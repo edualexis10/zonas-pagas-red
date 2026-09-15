@@ -1,0 +1,7 @@
+node_modules/
+uploads/*
+!uploads/.gitkeep
+converted/*
+!converted/.gitkeep
+.DS_Store
+*.log

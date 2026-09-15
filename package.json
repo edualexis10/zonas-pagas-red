@@ -1,0 +1,27 @@
+{
+  "name": "zonas-pagas-red",
+  "version": "1.0.0",
+  "description": "",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/edualexis10/zonas-pagas-red.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/edualexis10/zonas-pagas-red/issues"
+  },
+  "homepage": "https://github.com/edualexis10/zonas-pagas-red#readme",
+  "dependencies": {
+    "express": "^5.2.1",
+    "ffmpeg-static": "^5.3.0",
+    "fluent-ffmpeg": "^2.1.3",
+    "multer": "^2.4.0"
+  }
+}
