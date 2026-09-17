@@ -90,7 +90,17 @@ def main():
         help="Frames consecutivos requeridos en el nuevo lado antes de confirmar un cruce",
     )
     parser.add_argument("--conf", type=float, default=0.4, help="Umbral de confianza de YOLO")
+    parser.add_argument(
+        "--vid-stride", type=int, default=1,
+        help=(
+            "Analiza 1 de cada N frames (acelera videos largos; una persona tarda "
+            "bien más de un frame en cruzar la puerta, así que valores 2-5 casi no "
+            "afectan el conteo). --dwell-frames y --hysteresis-frames se escalan "
+            "automáticamente para mantenerse equivalentes en tiempo real."
+        ),
+    )
     args = parser.parse_args()
+    args.vid_stride = max(1, args.vid_stride)
 
     if args.door_type == "principal" and not args.zone:
         print(
@@ -111,6 +121,11 @@ def main():
     line_a, line_b = parse_coords(args.line, width, height)
     zone = parse_zone(args.zone, width, height) if args.zone else None
 
+    # umbrales pedidos en frames "a tasa completa"; se escalan al stride real
+    # para que sigan representando el mismo tiempo aproximado en video.
+    effective_dwell_frames = max(1, round(args.dwell_frames / args.vid_stride))
+    effective_hysteresis_frames = max(1, round(args.hysteresis_frames / args.vid_stride))
+
     model = YOLO(args.model)
     results = model.track(
         source=args.video,
@@ -120,6 +135,7 @@ def main():
         stream=True,
         verbose=False,
         tracker="bytetrack.yaml",
+        vid_stride=args.vid_stride,
     )
 
     track_state = {}
@@ -127,7 +143,7 @@ def main():
     frame_idx = 0
 
     for r in results:
-        frame_idx += 1
+        frame_idx += args.vid_stride
         if r.boxes is None or r.boxes.id is None:
             continue
 
@@ -154,7 +170,7 @@ def main():
                 zx1, zy1, zx2, zy2 = zone
                 if zx1 <= cx <= zx2 and zy1 <= cy <= zy2:
                     state["zone_frames"] += 1
-                    if state["zone_frames"] >= args.dwell_frames:
+                    if state["zone_frames"] >= effective_dwell_frames:
                         state["validated"] = True
 
             s = side_of_line((cx, cy), line_a, line_b)
@@ -176,7 +192,7 @@ def main():
                 state["pending_side"] = cur_side
                 state["pending_count"] = 1
 
-            if state["pending_count"] < args.hysteresis_frames:
+            if state["pending_count"] < effective_hysteresis_frames:
                 continue
 
             # cruce confirmado

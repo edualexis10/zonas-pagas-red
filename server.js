@@ -125,11 +125,14 @@ app.post('/api/passenger-count/analyze', uploadCounterVideo.single('video'), (re
   if (req.body.zone) args.push('--zone', req.body.zone);
   if (req.body.boardingSide) args.push('--boarding-side', req.body.boardingSide);
   if (req.body.dwellFrames) args.push('--dwell-frames', String(req.body.dwellFrames));
+  if (req.body.vidStride) args.push('--vid-stride', String(req.body.vidStride));
+
+  const ANALYZE_TIMEOUT_MS = Number(process.env.ANALYZE_TIMEOUT_MS) || 3 * 60 * 60 * 1000;
 
   execFile(
     PYTHON_BIN,
     args,
-    { maxBuffer: 1024 * 1024 * 50, timeout: 10 * 60 * 1000 },
+    { maxBuffer: 1024 * 1024 * 50, timeout: ANALYZE_TIMEOUT_MS },
     (err, stdout, stderr) => {
       fs.unlink(req.file.path, () => {});
 

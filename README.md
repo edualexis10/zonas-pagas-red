@@ -50,6 +50,13 @@ La primera ejecución descarga automáticamente los pesos `yolov8n.pt` (requiere
 internet). Si el binario de Python no se llama `python3` en tu entorno, define
 la variable de entorno `PYTHON_BIN` antes de correr `npm start`.
 
+### Videos largos (ej. ~2 horas)
+
+- **No subas videos largos a mí (Claude) por chat ni por un conector como Drive**: yo recibo archivos como texto (base64), así que algo de 200+ MB o 2 horas revienta el límite de contexto. Ese flujo solo sirve para clips cortos de prueba/calibración (10-60s).
+- **Para uso real**, el video completo debe ir directo del origen (cámara/DVR o tu equipo) al servidor de esta app — por el formulario web (`conteo.html`) o llamando `POST /api/passenger-count/analyze` directamente — donde se guarda en disco y se procesa localmente, sin pasar por el chat.
+- **Rendimiento**: analizar cada frame de un video de 2 horas con YOLO en CPU puede tardar horas. Usa el parámetro `vidStride` (o `--vid-stride` en el script) para analizar 1 de cada N frames — un valor de 3 a 5 acelera el análisis varias veces con impacto mínimo en el conteo, porque una persona tarda bien más de un frame en cruzar la puerta. Los umbrales de permanencia/histéresis se reescalan automáticamente según el stride.
+- Si tienes acceso a GPU en el entorno de despliegue, ultralytics la usa automáticamente y es mucho más rápido que CPU para videos largos.
+
 ### Calibración (importante)
 
 - La **línea de conteo** y la **zona del validador** están definidas como

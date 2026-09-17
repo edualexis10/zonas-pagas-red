@@ -71,6 +71,7 @@ cameraCards.forEach((card) => {
     formData.append('video', videoInput.files[0]);
     formData.append('doorType', doorType);
     formData.append('line', card.querySelector('[data-role="line"]').value);
+    formData.append('vidStride', card.querySelector('[data-role="vid-stride"]').value);
 
     if (doorType === 'principal') {
       formData.append('zone', card.querySelector('[data-role="zone"]').value);
