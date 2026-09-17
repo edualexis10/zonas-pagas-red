@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Contador de Pasajeros</title>
+  <link rel="stylesheet" href="style.css" />
+  <link rel="stylesheet" href="conteo.css" />
+</head>
+<body>
+  <main class="card wide">
+    <h1>Contador de Pasajeros</h1>
+    <p class="subtitle">
+      Sube el video de cada cámara para contar cuántos pasajeros pagan y cuántos evaden.
+      El conteo se hace con detección y seguimiento de personas (YOLOv8), no es 100% exacto:
+      calibra la línea de conteo y la zona del validador según el encuadre real de cada cámara.
+    </p>
+    <p class="subtitle"><a href="index.html">&larr; Volver al conversor de videos</a></p>
+
+    <div class="camera-grid">
+      <section class="camera-card" data-door="principal">
+        <h2>Puerta principal (validador)</h2>
+        <p class="hint">Quien no permanece frente al validador se cuenta como evasor.</p>
+        <label class="dropzone" data-role="dropzone">
+          <span data-role="file-label">Arrastra el video aquí o haz clic para elegirlo</span>
+          <input type="file" accept="video/*" hidden data-role="video-input" />
+        </label>
+
+        <div class="or-divider">— o —</div>
+        <label>Pega un enlace (Google Drive u otro, debe ser público)
+          <input type="url" data-role="video-url" placeholder="https://drive.google.com/file/d/..." />
+        </label>
+
+        <details>
+          <summary>Calibración avanzada</summary>
+          <label>Línea de conteo (x1,y1,x2,y2 normalizado 0-1)
+            <input type="text" data-role="line" value="0,0.5,1,0.5" />
+          </label>
+          <label>Zona del validador (x1,y1,x2,y2 normalizado 0-1)
+            <input type="text" data-role="zone" value="0.3,0.2,0.7,0.7" />
+          </label>
+          <label>Frames mínimos frente al validador para contar "pagó"
+            <input type="number" data-role="dwell" value="5" min="1" />
+          </label>
+          <label>Analizar 1 de cada N frames (sube esto para videos largos)
+            <input type="number" data-role="vid-stride" value="1" min="1" />
+          </label>
+        </details>
+
+        <button type="button" class="secondary" data-role="preview-btn">Vista previa (ver línea/zona sobre la cámara)</button>
+        <img class="preview-img" data-role="preview-img" hidden alt="Vista previa de calibración" />
+
+        <button type="button" data-role="analyze-btn">Analizar</button>
+        <div class="status" data-role="status" hidden></div>
+        <div class="counts" data-role="counts" hidden>
+          <div class="count paga"><span data-role="count-paga">0</span><small>pagaron</small></div>
+          <div class="count evade"><span data-role="count-evade">0</span><small>evadieron</small></div>
+        </div>
+        <img class="preview-img" data-role="sample-frame" hidden alt="Frame de referencia del análisis" />
+        <div class="thumb-gallery" data-role="thumb-gallery" hidden></div>
+      </section>
+
+      <section class="camera-card" data-door="bajada" data-camera-id="bajada1">
+        <h2>Puerta de bajada 1</h2>
+        <p class="hint">Quien sube por esta puerta (no baja) se cuenta como evasor.</p>
+        <label class="dropzone" data-role="dropzone">
+          <span data-role="file-label">Arrastra el video aquí o haz clic para elegirlo</span>
+          <input type="file" accept="video/*" hidden data-role="video-input" />
+        </label>
+
+        <div class="or-divider">— o —</div>
+        <label>Pega un enlace (Google Drive u otro, debe ser público)
+          <input type="url" data-role="video-url" placeholder="https://drive.google.com/file/d/..." />
+        </label>
+
+        <details>
+          <summary>Calibración avanzada</summary>
+          <label>Línea de conteo (x1,y1,x2,y2 normalizado 0-1)
+            <input type="text" data-role="line" value="0,0.5,1,0.5" />
+          </label>
+          <label>Lado de la calle (1 o 2, según cuál lado de la línea da hacia afuera del bus)
+            <input type="text" data-role="boarding-side" value="1" />
+          </label>
+          <label>Analizar 1 de cada N frames (sube esto para videos largos)
+            <input type="number" data-role="vid-stride" value="1" min="1" />
+          </label>
+        </details>
+
+        <button type="button" class="secondary" data-role="preview-btn">Vista previa (ver línea sobre la cámara)</button>
+        <img class="preview-img" data-role="preview-img" hidden alt="Vista previa de calibración" />
+
+        <button type="button" data-role="analyze-btn">Analizar</button>
+        <div class="status" data-role="status" hidden></div>
+        <div class="counts" data-role="counts" hidden>
+          <div class="count evade"><span data-role="count-evade">0</span><small>subieron (evasores)</small></div>
+          <div class="count baja"><span data-role="count-baja">0</span><small>bajaron</small></div>
+        </div>
+        <img class="preview-img" data-role="sample-frame" hidden alt="Frame de referencia del análisis" />
+        <div class="thumb-gallery" data-role="thumb-gallery" hidden></div>
+      </section>
+
+      <section class="camera-card" data-door="bajada" data-camera-id="bajada2">
+        <h2>Puerta de bajada 2</h2>
+        <p class="hint">Quien sube por esta puerta (no baja) se cuenta como evasor.</p>
+        <label class="dropzone" data-role="dropzone">
+          <span data-role="file-label">Arrastra el video aquí o haz clic para elegirlo</span>
+          <input type="file" accept="video/*" hidden data-role="video-input" />
+        </label>
+
+        <div class="or-divider">— o —</div>
+        <label>Pega un enlace (Google Drive u otro, debe ser público)
+          <input type="url" data-role="video-url" placeholder="https://drive.google.com/file/d/..." />
+        </label>
+
+        <details>
+          <summary>Calibración avanzada</summary>
+          <label>Línea de conteo (x1,y1,x2,y2 normalizado 0-1)
+            <input type="text" data-role="line" value="0,0.5,1,0.5" />
+          </label>
+          <label>Lado de la calle (1 o 2, según cuál lado de la línea da hacia afuera del bus)
+            <input type="text" data-role="boarding-side" value="1" />
+          </label>
+          <label>Analizar 1 de cada N frames (sube esto para videos largos)
+            <input type="number" data-role="vid-stride" value="1" min="1" />
+          </label>
+        </details>
+
+        <button type="button" class="secondary" data-role="preview-btn">Vista previa (ver línea sobre la cámara)</button>
+        <img class="preview-img" data-role="preview-img" hidden alt="Vista previa de calibración" />
+
+        <button type="button" data-role="analyze-btn">Analizar</button>
+        <div class="status" data-role="status" hidden></div>
+        <div class="counts" data-role="counts" hidden>
+          <div class="count evade"><span data-role="count-evade">0</span><small>subieron (evasores)</small></div>
+          <div class="count baja"><span data-role="count-baja">0</span><small>bajaron</small></div>
+        </div>
+        <img class="preview-img" data-role="sample-frame" hidden alt="Frame de referencia del análisis" />
+        <div class="thumb-gallery" data-role="thumb-gallery" hidden></div>
+      </section>
+    </div>
+
+    <section class="summary">
+      <h2>Resumen del viaje</h2>
+      <div class="summary-grid">
+        <div class="summary-item"><span id="total-paga">0</span><small>pagaron</small></div>
+        <div class="summary-item"><span id="total-evade">0</span><small>evadieron</small></div>
+        <div class="summary-item"><span id="total-baja">0</span><small>bajaron</small></div>
+        <div class="summary-item"><span id="tasa-evasion">0%</span><small>tasa de evasión</small></div>
+      </div>
+    </section>
+  </main>
+
+  <script src="conteo.js"></script>
+</body>
+</html>
