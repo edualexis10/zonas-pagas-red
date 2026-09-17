@@ -59,9 +59,17 @@ de pasajeros que pagaron vs. evadieron.
 - **Puertas de bajada**: no hay validador. Se asume que la parada NO es zona
   paga, así que cualquier persona que cruza la línea en sentido de *subida*
   (en vez de bajada) se cuenta como evasora.
-- `server.js` expone `POST /api/passenger-count/analyze` (multipart: `video`,
-  `doorType`, `line`, `zone`/`boardingSide` según la puerta) que invoca el
-  script Python como subproceso y devuelve el resumen en JSON.
+- `server.js` expone `POST /api/passenger-count/analyze` (multipart: `video`
+  **o** `videoUrl`, más `doorType`, `line`, `zone`/`boardingSide` según la
+  puerta) que invoca el script Python como subproceso y devuelve el resumen
+  en JSON.
+- En vez de subir el archivo desde el navegador, se puede pegar un enlace
+  (`videoUrl`) — el servidor lo descarga directo a su disco. Soporta enlaces
+  de Google Drive (maneja automáticamente la página de confirmación que
+  Drive muestra en archivos grandes; el archivo debe ser público, "Cualquier
+  persona con el enlace") y URLs de descarga directa de cualquier otro host.
+  Esto evita el límite de tamaño de subida del navegador y es la forma
+  recomendada para los videos largos.
 
 ### Instalación de dependencias Python
 

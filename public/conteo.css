@@ -35,6 +35,30 @@
   font-size: 0.85rem;
 }
 
+.camera-card .or-divider {
+  text-align: center;
+  color: #94a3b8;
+  font-size: 0.75rem;
+  font-weight: 600;
+}
+
+.camera-card > label {
+  font-size: 0.82rem;
+  color: #334155;
+  font-weight: 600;
+}
+
+.camera-card > label input[type='url'] {
+  display: block;
+  width: 100%;
+  margin-top: 4px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  border: 1px solid #cbd5e1;
+  font-size: 0.85rem;
+  font-weight: 400;
+}
+
 .camera-card details {
   font-size: 0.82rem;
   color: #334155;

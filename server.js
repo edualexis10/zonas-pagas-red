@@ -1,6 +1,9 @@
 const path = require('path');
 const fs = require('fs');
 const { execFile } = require('child_process');
+const { pipeline } = require('stream/promises');
+const { Readable } = require('stream');
+const crypto = require('crypto');
 const express = require('express');
 const multer = require('multer');
 const ffmpeg = require('fluent-ffmpeg');
@@ -40,6 +43,57 @@ const uploadCounterVideo = multer({
     cb(null, true);
   },
 });
+
+function extractGoogleDriveFileId(url) {
+  const patterns = [/\/file\/d\/([a-zA-Z0-9_-]+)/, /[?&]id=([a-zA-Z0-9_-]+)/];
+  for (const pattern of patterns) {
+    const match = url.match(pattern);
+    if (match) return match[1];
+  }
+  return null;
+}
+
+async function downloadGoogleDriveFile(fileId, destPath) {
+  const baseUrl = `https://drive.google.com/uc?export=download&id=${fileId}`;
+  let response = await fetch(baseUrl);
+  const cookies = response.headers.get('set-cookie') || '';
+  const contentType = response.headers.get('content-type') || '';
+
+  if (contentType.includes('text/html')) {
+    const html = await response.text();
+    const confirmMatch = html.match(/confirm=([0-9A-Za-z_-]+)/);
+    if (!confirmMatch) {
+      throw new Error(
+        'No se pudo descargar desde Google Drive. Verifica que el enlace sea público ("Cualquier persona con el enlace puede ver").'
+      );
+    }
+    const confirmUrl = `https://drive.google.com/uc?export=download&confirm=${confirmMatch[1]}&id=${fileId}`;
+    response = await fetch(confirmUrl, { headers: { cookie: cookies } });
+  }
+
+  if (!response.ok || !response.body) {
+    throw new Error(`Google Drive respondió con error (HTTP ${response.status}).`);
+  }
+
+  await pipeline(Readable.fromWeb(response.body), fs.createWriteStream(destPath));
+}
+
+async function downloadDirectFile(url, destPath) {
+  const response = await fetch(url);
+  if (!response.ok || !response.body) {
+    throw new Error(`No se pudo descargar el archivo (HTTP ${response.status}).`);
+  }
+  await pipeline(Readable.fromWeb(response.body), fs.createWriteStream(destPath));
+}
+
+async function downloadVideoFromUrl(url, destPath) {
+  const driveId = extractGoogleDriveFileId(url);
+  if (driveId) {
+    await downloadGoogleDriveFile(driveId, destPath);
+  } else {
+    await downloadDirectFile(url, destPath);
+  }
+}
 
 const app = express();
 app.use(express.static(path.join(__dirname, 'public')));
@@ -99,27 +153,46 @@ app.get('/api/download/:fileName', (req, res) => {
   res.download(filePath, fileName);
 });
 
-app.post('/api/passenger-count/analyze', uploadCounterVideo.single('video'), (req, res) => {
-  if (!req.file) {
-    return res.status(400).json({ error: 'No se recibió ningún archivo de video.' });
-  }
-
+app.post('/api/passenger-count/analyze', uploadCounterVideo.single('video'), async (req, res) => {
   const doorType = req.body.doorType;
+  const cleanup = () => {
+    if (req.file) fs.unlink(req.file.path, () => {});
+  };
+
   if (!['principal', 'bajada'].includes(doorType)) {
-    fs.unlink(req.file.path, () => {});
+    cleanup();
     return res.status(400).json({ error: "doorType debe ser 'principal' o 'bajada'." });
   }
 
   if (doorType === 'principal' && !req.body.zone) {
-    fs.unlink(req.file.path, () => {});
+    cleanup();
     return res.status(400).json({ error: "Puerta 'principal' requiere la zona del validador (zone)." });
   }
 
-  // multer guarda el archivo sin extensión; ultralytics necesita una extensión
-  // de video reconocida para tratarlo como tal.
-  const ext = path.extname(req.file.originalname) || '.mp4';
-  const videoPath = `${req.file.path}${ext}`;
-  fs.renameSync(req.file.path, videoPath);
+  if (!req.file && !req.body.videoUrl) {
+    return res.status(400).json({ error: 'Debes subir un video o pegar un enlace (videoUrl).' });
+  }
+
+  let videoPath;
+
+  if (req.file) {
+    // multer guarda el archivo sin extensión; ultralytics necesita una
+    // extensión de video reconocida para tratarlo como tal.
+    const ext = path.extname(req.file.originalname) || '.mp4';
+    videoPath = `${req.file.path}${ext}`;
+    fs.renameSync(req.file.path, videoPath);
+  } else {
+    videoPath = path.join(UPLOAD_DIR, `${crypto.randomUUID()}.mp4`);
+    try {
+      await downloadVideoFromUrl(req.body.videoUrl, videoPath);
+    } catch (downloadErr) {
+      fs.unlink(videoPath, () => {});
+      return res.status(400).json({
+        error: 'No se pudo descargar el video desde el enlace.',
+        details: downloadErr.message,
+      });
+    }
+  }
 
   const args = [
     ANALYZE_SCRIPT,

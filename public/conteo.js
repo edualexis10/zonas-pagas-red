@@ -37,6 +37,7 @@ cameraCards.forEach((card) => {
   const dropzone = card.querySelector('[data-role="dropzone"]');
   const videoInput = card.querySelector('[data-role="video-input"]');
   const fileLabel = card.querySelector('[data-role="file-label"]');
+  const videoUrlInput = card.querySelector('[data-role="video-url"]');
   const analyzeBtn = card.querySelector('[data-role="analyze-btn"]');
   const countsEl = card.querySelector('[data-role="counts"]');
   const doorType = card.dataset.door;
@@ -62,13 +63,19 @@ cameraCards.forEach((card) => {
   });
 
   analyzeBtn.addEventListener('click', async () => {
-    if (!videoInput.files.length) {
-      setCardStatus(card, 'Selecciona un video primero.', 'error');
+    const videoUrl = videoUrlInput.value.trim();
+
+    if (!videoInput.files.length && !videoUrl) {
+      setCardStatus(card, 'Selecciona un video o pega un enlace.', 'error');
       return;
     }
 
     const formData = new FormData();
-    formData.append('video', videoInput.files[0]);
+    if (videoInput.files.length) {
+      formData.append('video', videoInput.files[0]);
+    } else {
+      formData.append('videoUrl', videoUrl);
+    }
     formData.append('doorType', doorType);
     formData.append('line', card.querySelector('[data-role="line"]').value);
     formData.append('vidStride', card.querySelector('[data-role="vid-stride"]').value);
