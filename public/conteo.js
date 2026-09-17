@@ -33,14 +33,34 @@ function updateSummary() {
   document.getElementById('tasa-evasion').textContent = `${tasa}%`;
 }
 
+function labelFor(type) {
+  return { paga: 'Pagó', evade: 'Evadió', baja: 'Bajó' }[type] || type;
+}
+
 cameraCards.forEach((card) => {
   const dropzone = card.querySelector('[data-role="dropzone"]');
   const videoInput = card.querySelector('[data-role="video-input"]');
   const fileLabel = card.querySelector('[data-role="file-label"]');
   const videoUrlInput = card.querySelector('[data-role="video-url"]');
   const analyzeBtn = card.querySelector('[data-role="analyze-btn"]');
+  const previewBtn = card.querySelector('[data-role="preview-btn"]');
+  const previewImg = card.querySelector('[data-role="preview-img"]');
+  const sampleFrameImg = card.querySelector('[data-role="sample-frame"]');
+  const thumbGallery = card.querySelector('[data-role="thumb-gallery"]');
   const countsEl = card.querySelector('[data-role="counts"]');
   const doorType = card.dataset.door;
+
+  function videoFormData() {
+    const videoUrl = videoUrlInput.value.trim();
+    if (!videoInput.files.length && !videoUrl) return null;
+    const formData = new FormData();
+    if (videoInput.files.length) {
+      formData.append('video', videoInput.files[0]);
+    } else {
+      formData.append('videoUrl', videoUrl);
+    }
+    return formData;
+  }
 
   videoInput.addEventListener('change', () => {
     if (videoInput.files.length > 0) {
@@ -62,19 +82,46 @@ cameraCards.forEach((card) => {
     }
   });
 
-  analyzeBtn.addEventListener('click', async () => {
-    const videoUrl = videoUrlInput.value.trim();
-
-    if (!videoInput.files.length && !videoUrl) {
+  previewBtn.addEventListener('click', async () => {
+    const formData = videoFormData();
+    if (!formData) {
       setCardStatus(card, 'Selecciona un video o pega un enlace.', 'error');
       return;
     }
+    formData.append('line', card.querySelector('[data-role="line"]').value);
+    const zoneInput = card.querySelector('[data-role="zone"]');
+    if (zoneInput) formData.append('zone', zoneInput.value);
 
-    const formData = new FormData();
-    if (videoInput.files.length) {
-      formData.append('video', videoInput.files[0]);
-    } else {
-      formData.append('videoUrl', videoUrl);
+    previewBtn.disabled = true;
+    previewImg.hidden = true;
+    setCardStatus(card, 'Generando vista previa...', 'info');
+
+    try {
+      const response = await fetch('/api/passenger-count/preview', {
+        method: 'POST',
+        body: formData,
+      });
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.details || data.error || 'Error desconocido al generar la vista previa.');
+      }
+
+      previewImg.src = data.image;
+      previewImg.hidden = false;
+      setCardStatus(card, 'Vista previa lista. Ajusta línea/zona si no calzan y vuelve a intentar.', 'success');
+    } catch (err) {
+      setCardStatus(card, err.message, 'error');
+    } finally {
+      previewBtn.disabled = false;
+    }
+  });
+
+  analyzeBtn.addEventListener('click', async () => {
+    const formData = videoFormData();
+    if (!formData) {
+      setCardStatus(card, 'Selecciona un video o pega un enlace.', 'error');
+      return;
     }
     formData.append('doorType', doorType);
     formData.append('line', card.querySelector('[data-role="line"]').value);
@@ -89,6 +136,8 @@ cameraCards.forEach((card) => {
 
     analyzeBtn.disabled = true;
     countsEl.hidden = true;
+    sampleFrameImg.hidden = true;
+    thumbGallery.hidden = true;
     setCardStatus(card, 'Analizando video, esto puede tardar unos minutos...', 'info');
 
     try {
@@ -113,6 +162,31 @@ cameraCards.forEach((card) => {
         card.querySelector('[data-role="count-baja"]').textContent = data.summary.baja;
       }
       countsEl.hidden = false;
+
+      if (data.sample_frame) {
+        sampleFrameImg.src = data.sample_frame;
+        sampleFrameImg.hidden = false;
+      }
+
+      thumbGallery.innerHTML = '';
+      const withThumb = (data.events || []).filter((e) => e.thumbnail);
+      if (withThumb.length) {
+        withThumb.forEach((e) => {
+          const fig = document.createElement('figure');
+          fig.className = `thumb thumb-${e.type}`;
+          const img = document.createElement('img');
+          img.src = e.thumbnail;
+          img.alt = `${labelFor(e.type)} en el segundo ${e.timestamp_s}`;
+          const caption = document.createElement('figcaption');
+          caption.textContent = `${labelFor(e.type)} · ${e.timestamp_s}s`;
+          fig.appendChild(img);
+          fig.appendChild(caption);
+          thumbGallery.appendChild(fig);
+        });
+        thumbGallery.hidden = false;
+      } else {
+        thumbGallery.hidden = true;
+      }
 
       setCardStatus(card, `Listo (${data.frames_processed} frames procesados).`, 'success');
       updateSummary();

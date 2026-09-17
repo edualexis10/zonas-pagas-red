@@ -23,6 +23,7 @@ transacciones del validador para medir su precisión.
 Salida: un único JSON por stdout con el resumen y los eventos detectados.
 """
 import argparse
+import base64
 import json
 import sys
 
@@ -30,6 +31,36 @@ import cv2
 from ultralytics import YOLO
 
 PERSON_CLASS_ID = 0
+MAX_THUMBNAILS = 300  # límite de eventos con imagen, para no disparar el tamaño de la respuesta
+
+LABELS = {"paga": "PAGO", "evade": "EVADE", "baja": "BAJA"}
+COLORS_BGR = {"paga": (0, 170, 0), "evade": (0, 0, 220), "baja": (200, 130, 0)}
+
+
+def annotate_frame(frame, line_a, line_b, zone=None, box=None, label=None, color=(0, 200, 255)):
+    img = frame.copy()
+    cv2.line(img, (int(line_a[0]), int(line_a[1])), (int(line_b[0]), int(line_b[1])), (255, 80, 0), 2)
+    if zone is not None:
+        zx1, zy1, zx2, zy2 = (int(v) for v in zone)
+        cv2.rectangle(img, (zx1, zy1), (zx2, zy2), (0, 220, 220), 2)
+    if box is not None:
+        x1, y1, x2, y2 = (int(v) for v in box)
+        cv2.rectangle(img, (x1, y1), (x2, y2), color, 3)
+        if label:
+            ly = max(y1 - 10, 15)
+            cv2.putText(img, label, (x1, ly), cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+    return img
+
+
+def encode_jpeg_data_uri(img, max_width=480, quality=70):
+    h, w = img.shape[:2]
+    if w > max_width:
+        scale = max_width / w
+        img = cv2.resize(img, (max_width, int(h * scale)))
+    ok, buf = cv2.imencode(".jpg", img, [cv2.IMWRITE_JPEG_QUALITY, quality])
+    if not ok:
+        return None
+    return "data:image/jpeg;base64," + base64.b64encode(buf).decode("ascii")
 
 
 def side_of_line(point, a, b):
@@ -141,9 +172,14 @@ def main():
     track_state = {}
     events = []
     frame_idx = 0
+    sample_frame = None
 
     for r in results:
         frame_idx += args.vid_stride
+
+        if sample_frame is None and r.orig_img is not None:
+            sample_frame = encode_jpeg_data_uri(annotate_frame(r.orig_img, line_a, line_b, zone))
+
         if r.boxes is None or r.boxes.id is None:
             continue
 
@@ -212,6 +248,19 @@ def main():
                 is_boarding = from_side == args.boarding_side
                 event_type = "evade" if is_boarding else "baja"
 
+            thumbnail = None
+            if len(events) < MAX_THUMBNAILS:
+                thumb_img = annotate_frame(
+                    r.orig_img,
+                    line_a,
+                    line_b,
+                    zone,
+                    box=(x1, y1, x2, y2),
+                    label=LABELS[event_type],
+                    color=COLORS_BGR[event_type],
+                )
+                thumbnail = encode_jpeg_data_uri(thumb_img)
+
             events.append(
                 {
                     "track_id": int(tid),
@@ -219,6 +268,7 @@ def main():
                     "timestamp_s": timestamp,
                     "type": event_type,
                     "direction": f"{from_side}_to_{cur_side}",
+                    "thumbnail": thumbnail,
                 }
             )
             state["counted"] = True
@@ -236,6 +286,7 @@ def main():
                 "height": height,
                 "frames_processed": frame_idx,
                 "summary": summary,
+                "sample_frame": sample_frame,
                 "events": events,
             }
         )

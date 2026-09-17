@@ -32,6 +32,7 @@ const upload = multer({
 
 const PYTHON_BIN = process.env.PYTHON_BIN || 'python3';
 const ANALYZE_SCRIPT = path.join(__dirname, 'passenger-counter', 'analyze.py');
+const PREVIEW_SCRIPT = path.join(__dirname, 'passenger-counter', 'preview_frame.py');
 
 const uploadCounterVideo = multer({
   dest: UPLOAD_DIR,
@@ -104,6 +105,36 @@ async function downloadVideoFromUrl(url, destPath) {
   } else {
     await downloadDirectFile(url, destPath);
   }
+}
+
+// Resuelve el archivo de video subido o descargado desde un enlace a una
+// ruta en disco con extensión reconocida. Lanza con { status, error } si
+// no hay ni archivo ni enlace, o si la descarga falla.
+async function resolveVideoPath(req) {
+  if (req.file) {
+    const ext = path.extname(req.file.originalname) || '.mp4';
+    const videoPath = `${req.file.path}${ext}`;
+    fs.renameSync(req.file.path, videoPath);
+    return videoPath;
+  }
+
+  if (!req.body.videoUrl) {
+    const err = new Error('Debes subir un video o pegar un enlace (videoUrl).');
+    err.status = 400;
+    throw err;
+  }
+
+  const videoPath = path.join(UPLOAD_DIR, `${crypto.randomUUID()}.mp4`);
+  try {
+    await downloadVideoFromUrl(req.body.videoUrl, videoPath);
+  } catch (downloadErr) {
+    fs.unlink(videoPath, () => {});
+    const err = new Error(downloadErr.message);
+    err.status = 400;
+    err.publicMessage = 'No se pudo descargar el video desde el enlace.';
+    throw err;
+  }
+  return videoPath;
 }
 
 // Cargar YOLOv8/torch consume ~900MB de RAM por proceso; correr varios
@@ -207,29 +238,14 @@ app.post('/api/passenger-count/analyze', uploadCounterVideo.single('video'), asy
     return res.status(400).json({ error: "Puerta 'principal' requiere la zona del validador (zone)." });
   }
 
-  if (!req.file && !req.body.videoUrl) {
-    return res.status(400).json({ error: 'Debes subir un video o pegar un enlace (videoUrl).' });
-  }
-
   let videoPath;
-
-  if (req.file) {
-    // multer guarda el archivo sin extensión; ultralytics necesita una
-    // extensión de video reconocida para tratarlo como tal.
-    const ext = path.extname(req.file.originalname) || '.mp4';
-    videoPath = `${req.file.path}${ext}`;
-    fs.renameSync(req.file.path, videoPath);
-  } else {
-    videoPath = path.join(UPLOAD_DIR, `${crypto.randomUUID()}.mp4`);
-    try {
-      await downloadVideoFromUrl(req.body.videoUrl, videoPath);
-    } catch (downloadErr) {
-      fs.unlink(videoPath, () => {});
-      return res.status(400).json({
-        error: 'No se pudo descargar el video desde el enlace.',
-        details: downloadErr.message,
-      });
-    }
+  try {
+    videoPath = await resolveVideoPath(req);
+  } catch (err) {
+    return res.status(err.status || 500).json({
+      error: err.publicMessage || err.message,
+      ...(err.publicMessage ? { details: err.message } : {}),
+    });
   }
 
   const args = [
@@ -250,7 +266,7 @@ app.post('/api/passenger-count/analyze', uploadCounterVideo.single('video'), asy
   try {
     ({ stdout } = await runAnalyzeExclusive(() =>
       execFilePromise(PYTHON_BIN, args, {
-        maxBuffer: 1024 * 1024 * 50,
+        maxBuffer: 1024 * 1024 * 200,
         timeout: ANALYZE_TIMEOUT_MS,
         cwd: path.dirname(ANALYZE_SCRIPT),
       })
@@ -271,6 +287,57 @@ app.post('/api/passenger-count/analyze', uploadCounterVideo.single('video'), asy
   } catch (parseErr) {
     return res.status(500).json({
       error: 'No se pudo interpretar la salida del analizador.',
+      details: stdout,
+    });
+  }
+
+  if (result.error) {
+    return res.status(400).json(result);
+  }
+
+  res.json(result);
+});
+
+app.post('/api/passenger-count/preview', uploadCounterVideo.single('video'), async (req, res) => {
+  let videoPath;
+  try {
+    videoPath = await resolveVideoPath(req);
+  } catch (err) {
+    return res.status(err.status || 500).json({
+      error: err.publicMessage || err.message,
+      ...(err.publicMessage ? { details: err.message } : {}),
+    });
+  }
+
+  const args = [PREVIEW_SCRIPT, '--video', videoPath];
+  if (req.body.line) args.push('--line', req.body.line);
+  if (req.body.zone) args.push('--zone', req.body.zone);
+
+  // No pasa por la cola de análisis: no carga torch/YOLO, es liviano y
+  // rápido, así que no hace falta serializarlo contra los análisis pesados.
+  let stdout;
+  try {
+    ({ stdout } = await execFilePromise(PYTHON_BIN, args, {
+      maxBuffer: 1024 * 1024 * 20,
+      timeout: 60 * 1000,
+      cwd: path.dirname(PREVIEW_SCRIPT),
+    }));
+  } catch (err) {
+    fs.unlink(videoPath, () => {});
+    return res.status(500).json({
+      error: 'Error al generar la vista previa.',
+      details: err.stderr?.trim() || err.message,
+    });
+  }
+
+  fs.unlink(videoPath, () => {});
+
+  let result;
+  try {
+    result = JSON.parse(stdout.trim().split('\n').pop());
+  } catch (parseErr) {
+    return res.status(500).json({
+      error: 'No se pudo interpretar la salida de la vista previa.',
       details: stdout,
     });
   }
