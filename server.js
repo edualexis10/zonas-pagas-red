@@ -115,9 +115,15 @@ app.post('/api/passenger-count/analyze', uploadCounterVideo.single('video'), (re
     return res.status(400).json({ error: "Puerta 'principal' requiere la zona del validador (zone)." });
   }
 
+  // multer guarda el archivo sin extensión; ultralytics necesita una extensión
+  // de video reconocida para tratarlo como tal.
+  const ext = path.extname(req.file.originalname) || '.mp4';
+  const videoPath = `${req.file.path}${ext}`;
+  fs.renameSync(req.file.path, videoPath);
+
   const args = [
     ANALYZE_SCRIPT,
-    '--video', req.file.path,
+    '--video', videoPath,
     '--door-type', doorType,
   ];
 
@@ -132,9 +138,9 @@ app.post('/api/passenger-count/analyze', uploadCounterVideo.single('video'), (re
   execFile(
     PYTHON_BIN,
     args,
-    { maxBuffer: 1024 * 1024 * 50, timeout: ANALYZE_TIMEOUT_MS },
+    { maxBuffer: 1024 * 1024 * 50, timeout: ANALYZE_TIMEOUT_MS, cwd: path.dirname(ANALYZE_SCRIPT) },
     (err, stdout, stderr) => {
-      fs.unlink(req.file.path, () => {});
+      fs.unlink(videoPath, () => {});
 
       if (err) {
         return res.status(500).json({
