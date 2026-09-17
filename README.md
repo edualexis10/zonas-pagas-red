@@ -11,6 +11,31 @@ npm start
 
 Abre `http://localhost:3000`, sube un video, elige el formato de salida (MP4 por defecto) y descarga el resultado.
 
+## Despliegue con URL pública (Railway / Render)
+
+El repo incluye un `Dockerfile` que instala Node, Python y todas las
+dependencias (incluye `torch` CPU-only para mantener la imagen liviana). Para
+tener la app accesible desde cualquier lado:
+
+**Railway**
+1. Entra a [railway.app](https://railway.app) → "New Project" → "Deploy from GitHub repo".
+2. Selecciona este repositorio y la rama que quieras desplegar.
+3. Railway detecta el `Dockerfile` automáticamente y construye la imagen.
+4. En "Settings" → "Networking", genera un dominio público. Ese es el link para abrir la app.
+
+**Render**
+1. Entra a [render.com](https://render.com) → "New" → "Web Service".
+2. Conecta este repositorio; en "Environment" elige **Docker** (usa el `Dockerfile` del repo).
+3. Render construye la imagen y te da una URL pública (`https://tu-app.onrender.com`) al terminar el deploy.
+
+En ambos casos, una vez desplegado abre `/conteo.html` en esa URL para usar el
+contador de pasajeros, o la raíz `/` para el conversor de video.
+
+**Nota sobre recursos**: `ultralytics`/`torch` son pesados y corren en CPU en
+los tiers gratuitos, así que el análisis de videos largos será lento (ver
+sección "Videos largos" más abajo). Para uso real conviene un plan con más
+CPU/RAM, o un servidor con GPU si el volumen de videos es alto.
+
 ## Cómo funciona
 
 - Backend en Express (`server.js`) recibe el video subido con `multer`, lo procesa con `fluent-ffmpeg` (usando el binario incluido por `ffmpeg-static`, sin dependencias del sistema) y genera el archivo en el formato solicitado.

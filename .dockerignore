@@ -1,0 +1,12 @@
+node_modules
+passenger-counter/.venv
+passenger-counter/__pycache__
+passenger-counter/*.pt
+uploads/*
+!uploads/.gitkeep
+converted/*
+!converted/.gitkeep
+.git
+.gitignore
+*.log
+.DS_Store
