@@ -1,5 +1,6 @@
 const path = require('path');
 const fs = require('fs');
+const { execFile } = require('child_process');
 const express = require('express');
 const multer = require('multer');
 const ffmpeg = require('fluent-ffmpeg');
@@ -16,6 +17,20 @@ const OUTPUT_DIR = path.join(__dirname, 'converted');
 const ALLOWED_FORMATS = ['mp4', 'avi', 'mov', 'mkv', 'webm', 'gif'];
 
 const upload = multer({
+  dest: UPLOAD_DIR,
+  limits: { fileSize: 500 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    if (!file.mimetype.startsWith('video/')) {
+      return cb(new Error('El archivo debe ser un video.'));
+    }
+    cb(null, true);
+  },
+});
+
+const PYTHON_BIN = process.env.PYTHON_BIN || 'python3';
+const ANALYZE_SCRIPT = path.join(__dirname, 'passenger-counter', 'analyze.py');
+
+const uploadCounterVideo = multer({
   dest: UPLOAD_DIR,
   limits: { fileSize: 500 * 1024 * 1024 },
   fileFilter: (req, file, cb) => {
@@ -82,6 +97,66 @@ app.get('/api/download/:fileName', (req, res) => {
   }
 
   res.download(filePath, fileName);
+});
+
+app.post('/api/passenger-count/analyze', uploadCounterVideo.single('video'), (req, res) => {
+  if (!req.file) {
+    return res.status(400).json({ error: 'No se recibió ningún archivo de video.' });
+  }
+
+  const doorType = req.body.doorType;
+  if (!['principal', 'bajada'].includes(doorType)) {
+    fs.unlink(req.file.path, () => {});
+    return res.status(400).json({ error: "doorType debe ser 'principal' o 'bajada'." });
+  }
+
+  if (doorType === 'principal' && !req.body.zone) {
+    fs.unlink(req.file.path, () => {});
+    return res.status(400).json({ error: "Puerta 'principal' requiere la zona del validador (zone)." });
+  }
+
+  const args = [
+    ANALYZE_SCRIPT,
+    '--video', req.file.path,
+    '--door-type', doorType,
+  ];
+
+  if (req.body.line) args.push('--line', req.body.line);
+  if (req.body.zone) args.push('--zone', req.body.zone);
+  if (req.body.boardingSide) args.push('--boarding-side', req.body.boardingSide);
+  if (req.body.dwellFrames) args.push('--dwell-frames', String(req.body.dwellFrames));
+
+  execFile(
+    PYTHON_BIN,
+    args,
+    { maxBuffer: 1024 * 1024 * 50, timeout: 10 * 60 * 1000 },
+    (err, stdout, stderr) => {
+      fs.unlink(req.file.path, () => {});
+
+      if (err) {
+        return res.status(500).json({
+          error: 'Error al analizar el video.',
+          details: stderr?.trim() || err.message,
+        });
+      }
+
+      let result;
+      try {
+        result = JSON.parse(stdout.trim().split('\n').pop());
+      } catch (parseErr) {
+        return res.status(500).json({
+          error: 'No se pudo interpretar la salida del analizador.',
+          details: stdout,
+        });
+      }
+
+      if (result.error) {
+        return res.status(400).json(result);
+      }
+
+      res.json(result);
+    }
+  );
 });
 
 app.use((err, req, res, next) => {

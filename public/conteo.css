@@ -1,0 +1,132 @@
+.card.wide {
+  max-width: 960px;
+}
+
+.camera-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 16px;
+  margin-top: 16px;
+}
+
+.camera-card {
+  border: 1px solid #e2e8f0;
+  border-radius: 12px;
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.camera-card h2 {
+  margin: 0;
+  font-size: 1.05rem;
+  color: #0f172a;
+}
+
+.camera-card .hint {
+  margin: 0;
+  font-size: 0.82rem;
+  color: #64748b;
+}
+
+.camera-card .dropzone {
+  padding: 20px 10px;
+  font-size: 0.85rem;
+}
+
+.camera-card details {
+  font-size: 0.82rem;
+  color: #334155;
+}
+
+.camera-card details label {
+  display: block;
+  margin-top: 8px;
+  font-weight: 600;
+}
+
+.camera-card details input {
+  width: 100%;
+  margin-top: 4px;
+  padding: 6px 8px;
+  border-radius: 6px;
+  border: 1px solid #cbd5e1;
+  font-size: 0.85rem;
+}
+
+.camera-card button {
+  margin-top: 4px;
+}
+
+.counts {
+  display: flex;
+  gap: 8px;
+}
+
+.counts .count {
+  flex: 1;
+  text-align: center;
+  padding: 8px;
+  border-radius: 8px;
+  background: #f1f5f9;
+}
+
+.counts .count span {
+  display: block;
+  font-size: 1.4rem;
+  font-weight: 700;
+  color: #0f172a;
+}
+
+.counts .count small {
+  color: #64748b;
+}
+
+.counts .paga span {
+  color: #15803d;
+}
+
+.counts .evade span {
+  color: #b91c1c;
+}
+
+.counts .baja span {
+  color: #1d4ed8;
+}
+
+.summary {
+  margin-top: 32px;
+  border-top: 1px solid #e2e8f0;
+  padding-top: 16px;
+}
+
+.summary h2 {
+  margin: 0 0 12px;
+  font-size: 1.1rem;
+  color: #0f172a;
+}
+
+.summary-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  gap: 12px;
+}
+
+.summary-item {
+  text-align: center;
+  padding: 16px;
+  border-radius: 12px;
+  background: #f8fafc;
+}
+
+.summary-item span {
+  display: block;
+  font-size: 1.8rem;
+  font-weight: 700;
+  color: #0f172a;
+}
+
+.summary-item small {
+  color: #64748b;
+}

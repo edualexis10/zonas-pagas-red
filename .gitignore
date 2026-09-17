@@ -5,3 +5,6 @@ converted/*
 !converted/.gitkeep
 .DS_Store
 *.log
+passenger-counter/__pycache__/
+passenger-counter/.venv/
+passenger-counter/*.pt

@@ -16,3 +16,54 @@ Abre `http://localhost:3000`, sube un video, elige el formato de salida (MP4 por
 - Backend en Express (`server.js`) recibe el video subido con `multer`, lo procesa con `fluent-ffmpeg` (usando el binario incluido por `ffmpeg-static`, sin dependencias del sistema) y genera el archivo en el formato solicitado.
 - Frontend estático en `public/` con un formulario de carga (drag & drop) y selector de formato.
 - Formatos soportados: `mp4`, `avi`, `mov`, `mkv`, `webm`, `gif`.
+
+## Contador de pasajeros (pagan vs. evaden)
+
+Página en `public/conteo.html` para subir el video de hasta 3 cámaras de un bus
+(1 puerta principal con validador + 2 puertas de bajada) y obtener un conteo
+de pasajeros que pagaron vs. evadieron.
+
+### Cómo funciona
+
+- `passenger-counter/analyze.py` usa **YOLOv8** (`ultralytics`) para detectar y
+  seguir personas en el video, y cuenta cruces sobre una línea virtual
+  configurable por cámara.
+- **Puerta principal**: además de contar cruces, revisa si cada persona
+  permaneció ("dwell") el tiempo suficiente dentro de la zona del validador
+  (`--zone`). Quien no lo hizo se cuenta como evasor.
+- **Puertas de bajada**: no hay validador. Se asume que la parada NO es zona
+  paga, así que cualquier persona que cruza la línea en sentido de *subida*
+  (en vez de bajada) se cuenta como evasora.
+- `server.js` expone `POST /api/passenger-count/analyze` (multipart: `video`,
+  `doorType`, `line`, `zone`/`boardingSide` según la puerta) que invoca el
+  script Python como subproceso y devuelve el resumen en JSON.
+
+### Instalación de dependencias Python
+
+```bash
+cd passenger-counter
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
+```
+
+La primera ejecución descarga automáticamente los pesos `yolov8n.pt` (requiere
+internet). Si el binario de Python no se llama `python3` en tu entorno, define
+la variable de entorno `PYTHON_BIN` antes de correr `npm start`.
+
+### Calibración (importante)
+
+- La **línea de conteo** y la **zona del validador** están definidas como
+  coordenadas normalizadas (0 a 1) respecto al ancho/alto del video, porque
+  cada cámara tiene un encuadre distinto. Ajusta esos valores en la sección
+  "Calibración avanzada" de cada cámara en `conteo.html` mirando un frame de
+  referencia del video real.
+- **Limitación importante**: el video no permite "leer" si el validador
+  efectivamente aceptó el pago (luz verde, beep, etc.) salvo que se entrene un
+  modelo específico para eso. La detección de "pagó" usa una heurística de
+  permanencia frente al validador, que debe calibrarse y, de ser posible,
+  contrastarse contra el log real de transacciones del validador para medir
+  qué tan preciso es.
+- La geolocalización (coordenadas GPS) solo puede obtenerse si el video ya
+  trae esos metadatos embebidos (cámaras con GPS) o un overlay de texto con
+  coordenadas quemado en la imagen (requeriría OCR adicional). No es posible
+  derivar coordenadas reales solo a partir de la imagen.
