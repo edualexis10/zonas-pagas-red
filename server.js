@@ -60,15 +60,26 @@ async function downloadGoogleDriveFile(fileId, destPath) {
   const contentType = response.headers.get('content-type') || '';
 
   if (contentType.includes('text/html')) {
+    // Archivos grandes (>100MB) muestran una interstitial de "no se pudo
+    // escanear por virus" con un formulario hacia drive.usercontent.google.com
+    // que incluye un token "confirm" y un "uuid" por sesión.
     const html = await response.text();
-    const confirmMatch = html.match(/confirm=([0-9A-Za-z_-]+)/);
+    const confirmMatch = html.match(/name="confirm"\s+value="([^"]+)"/);
+    const uuidMatch = html.match(/name="uuid"\s+value="([^"]+)"/);
     if (!confirmMatch) {
       throw new Error(
         'No se pudo descargar desde Google Drive. Verifica que el enlace sea público ("Cualquier persona con el enlace puede ver").'
       );
     }
-    const confirmUrl = `https://drive.google.com/uc?export=download&confirm=${confirmMatch[1]}&id=${fileId}`;
-    response = await fetch(confirmUrl, { headers: { cookie: cookies } });
+    const params = new URLSearchParams({
+      id: fileId,
+      export: 'download',
+      confirm: confirmMatch[1],
+    });
+    if (uuidMatch) params.set('uuid', uuidMatch[1]);
+    response = await fetch(`https://drive.usercontent.google.com/download?${params}`, {
+      headers: { cookie: cookies },
+    });
   }
 
   if (!response.ok || !response.body) {
@@ -93,6 +104,33 @@ async function downloadVideoFromUrl(url, destPath) {
   } else {
     await downloadDirectFile(url, destPath);
   }
+}
+
+// Cargar YOLOv8/torch consume ~900MB de RAM por proceso; correr varios
+// análisis en paralelo puede tumbar el contenedor por falta de memoria.
+// Esta cola fuerza a que se procesen de a uno, sin importar cuántas
+// cámaras se manden a analizar al mismo tiempo desde el frontend.
+let analyzeQueue = Promise.resolve();
+function runAnalyzeExclusive(task) {
+  const run = analyzeQueue.then(task, task);
+  analyzeQueue = run.then(
+    () => {},
+    () => {}
+  );
+  return run;
+}
+
+function execFilePromise(command, args, options) {
+  return new Promise((resolve, reject) => {
+    execFile(command, args, options, (err, stdout, stderr) => {
+      if (err) {
+        err.stdout = stdout;
+        err.stderr = stderr;
+        return reject(err);
+      }
+      resolve({ stdout, stderr });
+    });
+  });
 }
 
 const app = express();
@@ -208,37 +246,40 @@ app.post('/api/passenger-count/analyze', uploadCounterVideo.single('video'), asy
 
   const ANALYZE_TIMEOUT_MS = Number(process.env.ANALYZE_TIMEOUT_MS) || 3 * 60 * 60 * 1000;
 
-  execFile(
-    PYTHON_BIN,
-    args,
-    { maxBuffer: 1024 * 1024 * 50, timeout: ANALYZE_TIMEOUT_MS, cwd: path.dirname(ANALYZE_SCRIPT) },
-    (err, stdout, stderr) => {
-      fs.unlink(videoPath, () => {});
+  let stdout;
+  try {
+    ({ stdout } = await runAnalyzeExclusive(() =>
+      execFilePromise(PYTHON_BIN, args, {
+        maxBuffer: 1024 * 1024 * 50,
+        timeout: ANALYZE_TIMEOUT_MS,
+        cwd: path.dirname(ANALYZE_SCRIPT),
+      })
+    ));
+  } catch (err) {
+    fs.unlink(videoPath, () => {});
+    return res.status(500).json({
+      error: 'Error al analizar el video.',
+      details: err.stderr?.trim() || err.message,
+    });
+  }
 
-      if (err) {
-        return res.status(500).json({
-          error: 'Error al analizar el video.',
-          details: stderr?.trim() || err.message,
-        });
-      }
+  fs.unlink(videoPath, () => {});
 
-      let result;
-      try {
-        result = JSON.parse(stdout.trim().split('\n').pop());
-      } catch (parseErr) {
-        return res.status(500).json({
-          error: 'No se pudo interpretar la salida del analizador.',
-          details: stdout,
-        });
-      }
+  let result;
+  try {
+    result = JSON.parse(stdout.trim().split('\n').pop());
+  } catch (parseErr) {
+    return res.status(500).json({
+      error: 'No se pudo interpretar la salida del analizador.',
+      details: stdout,
+    });
+  }
 
-      if (result.error) {
-        return res.status(400).json(result);
-      }
+  if (result.error) {
+    return res.status(400).json(result);
+  }
 
-      res.json(result);
-    }
-  );
+  res.json(result);
 });
 
 app.use((err, req, res, next) => {
