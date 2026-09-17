@@ -2,6 +2,13 @@
   max-width: 960px;
 }
 
+/* El atributo HTML `hidden` debe ganarle a cualquier `display` que
+   pongamos más abajo (.counts, .preview-img, .thumb-gallery, etc.),
+   si no los elementos quedan visibles aunque tengan `hidden`. */
+[hidden] {
+  display: none !important;
+}
+
 .camera-grid {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
