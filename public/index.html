@@ -9,12 +9,12 @@
 <body>
   <main class="card">
     <h1>Conversor de Videos</h1>
-    <p class="subtitle">Sube un video y conviértelo al formato que necesites (MP4, AVI, MOV, MKV, WEBM, GIF).</p>
+    <p class="subtitle">Sube uno o varios videos, de cualquier tamaño, y conviértelos en paralelo al formato que necesites.</p>
 
     <form id="convert-form">
       <label class="dropzone" id="dropzone" for="video-input">
-        <span id="file-label">Arrastra un video aquí o haz clic para elegirlo</span>
-        <input type="file" id="video-input" name="video" accept="video/*" required hidden />
+        <span id="file-label">Arrastra uno o varios videos aquí o haz clic para elegirlos</span>
+        <input type="file" id="video-input" name="videos" accept="video/*" multiple required hidden />
       </label>
 
       <label for="format-select">Formato de salida</label>
@@ -31,7 +31,7 @@
     </form>
 
     <div id="status" class="status" hidden></div>
-    <a id="download-link" class="download-link" hidden download>Descargar archivo convertido</a>
+    <ul id="job-list" class="job-list"></ul>
   </main>
 
   <script src="app.js"></script>

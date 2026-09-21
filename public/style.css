@@ -18,7 +18,9 @@ body {
   border-radius: 16px;
   padding: 32px;
   width: 100%;
-  max-width: 480px;
+  max-width: 560px;
+  max-height: 90vh;
+  overflow-y: auto;
   box-shadow: 0 20px 40px rgba(0, 0, 0, 0.3);
 }
 
@@ -123,4 +125,80 @@ button:disabled {
   color: #fff;
   text-decoration: none;
   font-weight: 600;
+}
+
+.job-list {
+  list-style: none;
+  margin: 20px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.job {
+  border: 1px solid #e2e8f0;
+  border-radius: 10px;
+  padding: 12px 14px;
+}
+
+.job-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+  font-size: 0.85rem;
+}
+
+.job-name {
+  color: #0f172a;
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.job-state {
+  color: #64748b;
+  flex-shrink: 0;
+}
+
+.job-state.error {
+  color: #b91c1c;
+}
+
+.job-state.done {
+  color: #15803d;
+}
+
+.progress-track {
+  margin-top: 8px;
+  height: 6px;
+  border-radius: 999px;
+  background: #e2e8f0;
+  overflow: hidden;
+}
+
+.progress-fill {
+  height: 100%;
+  background: #3b82f6;
+  border-radius: 999px;
+  transition: width 0.25s ease;
+}
+
+.job.done .progress-fill {
+  background: #16a34a;
+}
+
+.job.error .progress-fill {
+  background: #ef4444;
+}
+
+.job-download {
+  display: inline-block;
+  margin-top: 8px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: #2563eb;
+  text-decoration: none;
 }
