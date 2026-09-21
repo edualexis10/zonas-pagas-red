@@ -133,6 +133,17 @@ form.addEventListener('submit', async (e) => {
       method: 'POST',
       body: formData,
     });
+
+    const contentType = response.headers.get('content-type') || '';
+    if (!contentType.includes('application/json')) {
+      const text = (await response.text()).slice(0, 200);
+      throw new Error(
+        `El servidor respondió con estado ${response.status} en vez de JSON. ` +
+          `Esto suele pasar cuando el video supera el límite de subida del proxy. ` +
+          `Detalle: ${text || '(respuesta vacía)'}`
+      );
+    }
+
     const data = await response.json();
 
     if (!response.ok) {
