@@ -17,7 +17,6 @@ const OUTPUT_DIR = path.join(__dirname, 'converted');
 
 const ALLOWED_FORMATS = ['mp4', 'avi', 'mov', 'mkv', 'webm', 'gif'];
 const MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024; // 2 GB por video
-const MAX_FILES_PER_REQUEST = 20;
 
 // Varias conversiones a la vez, pero acotadas a los núcleos disponibles
 // para no saturar el servidor cuando llegan muchos videos juntos.
@@ -123,65 +122,116 @@ function convert(inputPath, outputPath, format, onProgress) {
   });
 }
 
-const upload = multer({
-  dest: UPLOAD_DIR,
-  limits: { fileSize: MAX_FILE_SIZE, files: MAX_FILES_PER_REQUEST },
-  fileFilter: (req, file, cb) => {
-    if (!file.mimetype.startsWith('video/')) {
-      return cb(new Error('Todos los archivos deben ser videos.'));
+function enqueueConversionJob(inputPath, originalName, format) {
+  const jobId = createJob(originalName);
+
+  enqueue(async () => {
+    const job = jobs.get(jobId);
+    job.status = 'processing';
+
+    const baseName = path.parse(originalName).name.replace(/[^a-zA-Z0-9_-]/g, '_');
+    const outputName = `${baseName}-${Date.now()}-${jobId.slice(0, 8)}.${format}`;
+    const outputPath = path.join(OUTPUT_DIR, outputName);
+
+    try {
+      await convert(inputPath, outputPath, format, (percent) => {
+        job.progress = percent;
+      });
+      job.status = 'done';
+      job.progress = 100;
+      job.fileName = outputName;
+      job.downloadUrl = `/api/download/${encodeURIComponent(outputName)}`;
+    } catch (err) {
+      job.status = 'error';
+      job.error = err.message || 'Error al convertir el video.';
+    } finally {
+      fs.unlink(inputPath, () => {});
     }
-    cb(null, true);
-  },
+  });
+
+  return jobId;
+}
+
+// Subida en fragmentos: cada video se envía en pedazos pequeños (unos pocos
+// MB) en vez de una sola solicitud gigante. Esto evita el límite de tamaño
+// de los proxies (como el de Codespaces/nginx) sin importar qué tan grande
+// sea el video, y permite mostrar progreso de subida en tiempo real.
+const uploadSessions = new Map(); // uploadId -> { stream, tempPath, fileName, format, bytesReceived, lastActivity }
+
+const chunkUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 16 * 1024 * 1024 }, // margen amplio sobre el tamaño de fragmento del cliente
 });
 
 const app = express();
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
-app.post('/api/convert', upload.array('videos', MAX_FILES_PER_REQUEST), (req, res) => {
-  const format = (req.body.format || 'mp4').toLowerCase();
-  const files = req.files || [];
+app.post('/api/upload/init', (req, res) => {
+  const fileName = req.body && req.body.fileName;
+  const format = ((req.body && req.body.format) || 'mp4').toLowerCase();
 
-  if (files.length === 0) {
-    return res.status(400).json({ error: 'No se recibió ningún archivo de video.' });
+  if (!fileName) {
+    return res.status(400).json({ error: 'Falta el nombre del archivo.' });
   }
-
   if (!ALLOWED_FORMATS.includes(format)) {
-    files.forEach((f) => fs.unlink(f.path, () => {}));
     return res.status(400).json({ error: `Formato no soportado: ${format}` });
   }
 
-  const createdJobs = files.map((file) => {
-    const jobId = createJob(file.originalname);
+  const uploadId = crypto.randomUUID();
+  const tempPath = path.join(UPLOAD_DIR, `${uploadId}.part`);
+  const stream = fs.createWriteStream(tempPath);
 
-    enqueue(async () => {
-      const job = jobs.get(jobId);
-      job.status = 'processing';
-
-      const baseName = path.parse(file.originalname).name.replace(/[^a-zA-Z0-9_-]/g, '_');
-      const outputName = `${baseName}-${Date.now()}-${jobId.slice(0, 8)}.${format}`;
-      const outputPath = path.join(OUTPUT_DIR, outputName);
-
-      try {
-        await convert(file.path, outputPath, format, (percent) => {
-          job.progress = percent;
-        });
-        job.status = 'done';
-        job.progress = 100;
-        job.fileName = outputName;
-        job.downloadUrl = `/api/download/${encodeURIComponent(outputName)}`;
-      } catch (err) {
-        job.status = 'error';
-        job.error = err.message || 'Error al convertir el video.';
-      } finally {
-        fs.unlink(file.path, () => {});
-      }
-    });
-
-    return { jobId, fileName: file.originalname };
+  uploadSessions.set(uploadId, {
+    stream,
+    tempPath,
+    fileName,
+    format,
+    bytesReceived: 0,
+    lastActivity: Date.now(),
   });
 
-  res.json({ jobs: createdJobs });
+  res.json({ uploadId });
+});
+
+app.post('/api/upload/chunk', chunkUpload.single('chunk'), (req, res) => {
+  const { uploadId } = req.body;
+  const isLast = req.body.isLast === 'true';
+  const session = uploadSessions.get(uploadId);
+
+  if (!session) {
+    return res.status(404).json({ error: 'Sesión de subida no encontrada o expirada.' });
+  }
+  if (!req.file || req.file.buffer.length === 0) {
+    return res.status(400).json({ error: 'Fragmento vacío.' });
+  }
+
+  session.bytesReceived += req.file.buffer.length;
+  session.lastActivity = Date.now();
+
+  if (session.bytesReceived > MAX_FILE_SIZE) {
+    session.stream.destroy();
+    fs.unlink(session.tempPath, () => {});
+    uploadSessions.delete(uploadId);
+    return res.status(413).json({ error: 'El video supera el tamaño máximo permitido (2 GB).' });
+  }
+
+  session.stream.write(req.file.buffer, (err) => {
+    if (err) {
+      uploadSessions.delete(uploadId);
+      return res.status(500).json({ error: 'Error al guardar el fragmento.' });
+    }
+
+    if (!isLast) {
+      return res.json({ done: false, bytesReceived: session.bytesReceived });
+    }
+
+    session.stream.end(() => {
+      uploadSessions.delete(uploadId);
+      const jobId = enqueueConversionJob(session.tempPath, session.fileName, session.format);
+      res.json({ done: true, jobId, fileName: session.fileName });
+    });
+  });
 });
 
 app.get('/api/jobs/:id', (req, res) => {
@@ -208,9 +258,18 @@ app.use((err, req, res, next) => {
 });
 
 // Limpia archivos convertidos de más de 1 hora para no llenar el disco
-// cuando se procesan muchos videos seguidos.
+// cuando se procesan muchos videos seguidos, y cierra sesiones de subida
+// abandonadas (el usuario cerró la pestaña a mitad de una subida).
 const MAX_AGE_MS = 60 * 60 * 1000;
 setInterval(() => {
+  for (const [uploadId, session] of uploadSessions) {
+    if (Date.now() - session.lastActivity > MAX_AGE_MS) {
+      session.stream.destroy();
+      fs.unlink(session.tempPath, () => {});
+      uploadSessions.delete(uploadId);
+    }
+  }
+
   for (const dir of [UPLOAD_DIR, OUTPUT_DIR]) {
     fs.readdir(dir, (err, entries) => {
       if (err) return;
