@@ -382,6 +382,16 @@ label {
   gap: 14px;
 }
 
+.merge-hint {
+  margin: 10px 0 0;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+
+.merge-hint:empty {
+  display: none;
+}
+
 .merge-status {
   margin-top: 14px;
   display: flex;

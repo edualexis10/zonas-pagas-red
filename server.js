@@ -2,6 +2,7 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const crypto = require('crypto');
+const { execFile } = require('child_process');
 const { Readable } = require('stream');
 const { pipeline } = require('stream/promises');
 const express = require('express');
@@ -197,6 +198,7 @@ function finishJob(job, outputName) {
 // ---------------------------------------------------------------------------
 
 const MAX_CAMERAS = 8;
+const AUDIO_ALL = -2; // audioIndex especial: cada cámara en su propia pista
 // Videos subidos con purpose=store: se guardan tal cual para poder generar
 // vistas previas reproducibles y luego unirlos en un mosaico sin resubirlos.
 const storedFiles = new Map(); // fileId -> { path, originalName }
@@ -269,7 +271,9 @@ function even(n) {
 // xstack. Las celdas vacías quedan en negro.
 //  - retraso > 0: la cámara empieza más tarde (se rellena con negro al inicio).
 //  - retraso < 0: se recorta el inicio de esa cámara.
-function buildMosaicPlan({ items, cols, rows, width, fps, audioIndex }) {
+// audioCameras: índices de las cámaras cuyo audio se incluye; cada una va en
+// su propia pista (nunca se mezclan), y el reproductor permite elegir cuál oír.
+function buildMosaicPlan({ items, cols, rows, width, fps, audioCameras = [] }) {
   const cellW = even(width / cols);
   const cellH = even((cellW * 9) / 16);
   const inputs = [];
@@ -298,17 +302,17 @@ function buildMosaicPlan({ items, cols, rows, width, fps, audioIndex }) {
     filters.push(`${stackInputs}xstack=inputs=${items.length}:layout=${layout}:fill=black[out]`);
   }
 
-  // El audio de la cámara elegida se toma de una entrada extra del mismo
-  // archivo, desplazada igual que su video, para no romper el mosaico si esa
-  // cámara no tiene pista de audio (el "?" la vuelve opcional).
-  let audioInput = null;
-  if (audioIndex >= 0 && audioIndex < items.length) {
-    const item = items[audioIndex];
-    const options = [];
-    if (item.delay < 0) options.push('-ss', String(-item.delay));
-    if (item.delay > 0) options.push('-itsoffset', String(item.delay));
-    audioInput = { path: item.path, options };
-  }
+  // El audio de cada cámara elegida se toma de una entrada extra del mismo
+  // archivo, desplazada igual que su video para que quede sincronizado.
+  const audioInputs = audioCameras
+    .filter((i) => i >= 0 && i < items.length)
+    .map((i) => {
+      const item = items[i];
+      const options = [];
+      if (item.delay < 0) options.push('-ss', String(-item.delay));
+      if (item.delay > 0) options.push('-itsoffset', String(item.delay));
+      return { path: item.path, options, camera: i };
+    });
 
   // El ancho/alto final cubre la grilla completa aunque falten cámaras.
   const outW = cellW * cols;
@@ -321,7 +325,7 @@ function buildMosaicPlan({ items, cols, rows, width, fps, audioIndex }) {
     filters[filters.length - 1] = `[v0]pad=${outW}:${outH}:0:0:color=black[out]`;
   }
 
-  return { inputs, audioInput, filter: filters.join(';'), outW, outH };
+  return { inputs, audioInputs, filter: filters.join(';'), outW, outH };
 }
 
 // ---------------------------------------------------------------------------
@@ -367,6 +371,32 @@ function fileNameFromResponse(response, url) {
   return last && last.includes('.') ? decodeURIComponent(last) : 'video-enlace.mp4';
 }
 
+async function fetchVideo(url) {
+  const response = await fetch(url, {
+    redirect: 'follow',
+    headers: { 'User-Agent': 'Mozilla/5.0 (VisorMulticamara)' },
+  });
+  if (!response.ok || !response.body) {
+    if (response.status === 401 || response.status === 403 || response.status === 404) {
+      throw new Error(
+        `el archivo no es público o no existe (HTTP ${response.status}). Compártelo como "cualquier persona con el enlace".`
+      );
+    }
+    throw new Error(`el enlace respondió con error HTTP ${response.status}`);
+  }
+  return response;
+}
+
+function driveConfirmUrl(html, baseUrl) {
+  const form = html.match(/<form[^>]*id="download-form"[^>]*action="([^"]+)"[^>]*>([\s\S]*?)<\/form>/i);
+  if (!form) return null;
+  const target = new URL(form[1].replace(/&amp;/g, '&'), baseUrl);
+  const inputRe = /<input[^>]*type="hidden"[^>]*name="([^"]+)"[^>]*value="([^"]*)"/gi;
+  let m;
+  while ((m = inputRe.exec(form[2]))) target.searchParams.set(m[1], m[2].replace(/&amp;/g, '&'));
+  return target.toString();
+}
+
 // Descarga el video del enlace al servidor (con progreso) y lo registra como
 // un archivo guardado más: luego sirve para la vista previa y el mosaico.
 function enqueueImportJob(url) {
@@ -381,14 +411,17 @@ function enqueueImportJob(url) {
     const tempPath = path.join(UPLOAD_DIR, `${fileId}.part`);
 
     try {
-      const response = await fetch(url, {
-        redirect: 'follow',
-        headers: { 'User-Agent': 'Mozilla/5.0 (VisorMulticamara)' },
-      });
-      if (!response.ok || !response.body) {
-        throw new Error(`el enlace respondió con error HTTP ${response.status}`);
+      let response = await fetchVideo(url);
+      let type = response.headers.get('content-type') || '';
+      // Google Drive muestra una página de confirmación ("no se puede analizar
+      // en busca de virus") para archivos grandes: se envía ese formulario.
+      if (type.includes('text/html') && /google/.test(new URL(response.url || url).hostname)) {
+        const confirmUrl = driveConfirmUrl(await response.text(), response.url || url);
+        if (confirmUrl) {
+          response = await fetchVideo(confirmUrl);
+          type = response.headers.get('content-type') || '';
+        }
       }
-      const type = response.headers.get('content-type') || '';
       if (type.includes('text/html')) {
         throw new Error(
           'el enlace abre una página web y no el video. Usa un enlace directo o comparte el archivo como público ("cualquier persona con el enlace").'
@@ -422,6 +455,26 @@ function enqueueImportJob(url) {
   return jobId;
 }
 
+// Revisa (con ffmpeg) si el archivo tiene alguna pista de audio.
+function hasAudioStream(filePath) {
+  return new Promise((resolve) => {
+    execFile(ffmpegPath, ['-hide_banner', '-i', filePath], (err, stdout, stderr) => {
+      resolve(/Stream #\S+.*: Audio:/.test(stderr || ''));
+    });
+  });
+}
+
+async function resolveAudioCameras(items, audioIndex) {
+  if (audioIndex === AUDIO_ALL) {
+    const flags = await Promise.all(items.map((item) => hasAudioStream(item.path)));
+    return items.map((_, i) => i).filter((i) => flags[i]);
+  }
+  if (audioIndex >= 0 && audioIndex < items.length && (await hasAudioStream(items[audioIndex].path))) {
+    return [audioIndex];
+  }
+  return [];
+}
+
 function enqueueMosaicJob(options) {
   const jobId = createJob(`mosaico-${options.items.length}-camaras.mp4`);
 
@@ -429,7 +482,8 @@ function enqueueMosaicJob(options) {
     const job = jobs.get(jobId);
     job.status = 'processing';
 
-    const plan = buildMosaicPlan(options);
+    const audioCameras = await resolveAudioCameras(options.items, options.audioIndex);
+    const plan = buildMosaicPlan({ ...options, audioCameras });
     const stamp = new Date().toISOString().replace(/[:T]/g, '-').slice(0, 19);
     const outputName = `mosaico-${options.items.length}cam-${stamp}-${jobId.slice(0, 6)}.mp4`;
     const command = ffmpeg();
@@ -438,10 +492,10 @@ function enqueueMosaicJob(options) {
       command.input(input.path);
       if (input.options.length) command.inputOptions(input.options);
     });
-    if (plan.audioInput) {
-      command.input(plan.audioInput.path);
-      if (plan.audioInput.options.length) command.inputOptions(plan.audioInput.options);
-    }
+    plan.audioInputs.forEach((input) => {
+      command.input(input.path);
+      if (input.options.length) command.inputOptions(input.options);
+    });
 
     const outputOptions = [
       '-filter_complex', plan.filter,
@@ -454,12 +508,23 @@ function enqueueMosaicJob(options) {
       '-threads', '0',
       '-movflags', '+faststart',
     ];
-    if (plan.audioInput) {
-      outputOptions.push('-map', `${plan.inputs.length}:a:0?`, '-c:a', 'aac', '-b:a', '128k');
+    if (plan.audioInputs.length) {
+      plan.audioInputs.forEach((input, k) => {
+        outputOptions.push(
+          '-map', `${plan.inputs.length + k}:a:0`,
+          // En MP4 el nombre de la pista se guarda como handler_name (lo muestra VLC).
+          `-metadata:s:a:${k}`, `title=Cámara ${input.camera + 1}`,
+          `-metadata:s:a:${k}`, `handler_name=Cámara ${input.camera + 1}`,
+          `-disposition:a:${k}`, k === 0 ? 'default' : '0'
+        );
+      });
+      outputOptions.push('-c:a', 'aac', '-b:a', '128k');
     } else {
       outputOptions.push('-an');
     }
-    command.outputOptions(outputOptions).toFormat('mp4');
+    // Se pasan como argumentos sueltos para que fluent-ffmpeg no parta en dos
+    // los valores con espacios (p. ej. "title=Cámara 1").
+    command.outputOptions(...outputOptions).toFormat('mp4');
 
     try {
       await runCommand(
@@ -471,6 +536,7 @@ function enqueueMosaicJob(options) {
         options.expectedDuration
       );
       finishJob(job, outputName);
+      job.audioTracks = plan.audioInputs.map((input) => input.camera + 1);
     } catch (err) {
       job.status = 'error';
       job.error = `No se pudo unir los videos: ${err.message}`;
@@ -578,6 +644,11 @@ app.get('/api/jobs/:id', (req, res) => {
 });
 
 app.post('/api/import', (req, res) => {
+  if (/drive\.google\.com\/drive\/(u\/\d+\/)?folders\//.test(String(req.body && req.body.url))) {
+    return res.status(400).json({
+      error: 'Es un enlace de carpeta de Google Drive. Abre cada video y copia su enlace por separado.',
+    });
+  }
   const url = normalizeVideoUrl(req.body && req.body.url);
   if (!url) {
     return res.status(400).json({ error: 'Enlace inválido. Debe empezar con http:// o https://' });
@@ -621,6 +692,9 @@ app.post('/api/mosaic', (req, res) => {
   const width = Math.max(640, Math.min(3840, Math.trunc(Number(body.width)) || 1920));
   const fps = Math.max(5, Math.min(60, Math.trunc(Number(body.fps)) || 25));
   const audioIndex = Number.isInteger(body.audioIndex) ? body.audioIndex : -1;
+  if (audioIndex >= items.length || audioIndex < AUDIO_ALL) {
+    return res.status(400).json({ error: 'Opción de audio inválida.' });
+  }
   const expectedDuration = Math.max(0, Number(body.expectedDuration) || 0);
 
   const jobId = enqueueMosaicJob({ items, cols, rows, width, fps, audioIndex, expectedDuration });
@@ -688,7 +762,7 @@ setInterval(() => {
   }
 }, 15 * 60 * 1000).unref();
 
-module.exports = { app, buildMosaicPlan, normalizeVideoUrl };
+module.exports = { app, buildMosaicPlan, normalizeVideoUrl, driveConfirmUrl };
 
 if (require.main === module) {
   const PORT = process.env.PORT || 3000;

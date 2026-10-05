@@ -9,6 +9,7 @@ const SERVER_ONLY_EXT = ['avi', 'dav', '264', 'h264', '265', 'h265', 'hevc', 'fl
 const PREVIEW_FORMAT = document.createElement('video').canPlayType('video/mp4; codecs="avc1.42E01E"')
   ? 'mp4'
   : 'webm';
+const AUDIO_ALL = -2;
 const AUTO_LAYOUTS = [[1, 1], [1, 1], [2, 1], [2, 2], [2, 2], [3, 2], [3, 2], [4, 2], [4, 2]];
 
 const $ = (id) => document.getElementById(id);
@@ -401,19 +402,39 @@ function render() {
     }
   }
 
-  // Lista de audio para el mosaico.
+  // Lista de audio para el mosaico: nunca se mezclan las cámaras.
   const previous = audioSelect.value;
   audioSelect.innerHTML = '<option value="-1">Sin audio</option>';
   slots.forEach((s, i) => {
     const opt = document.createElement('option');
     opt.value = String(i);
-    opt.textContent = `Cámara ${i + 1}`;
+    opt.textContent = `Solo cámara ${i + 1} · ${s.name}`;
     audioSelect.appendChild(opt);
   });
+  if (slots.length > 1) {
+    const opt = document.createElement('option');
+    opt.value = String(AUDIO_ALL);
+    opt.textContent = 'Todas, en pistas separadas (eliges en el reproductor)';
+    audioSelect.appendChild(opt);
+  }
   const audioSlot = slots.findIndex((s) => s.audio);
-  audioSelect.value = audioSlot >= 0 ? String(audioSlot) : Number(previous) < slots.length ? previous : '-1';
+  const keep = previous === String(AUDIO_ALL) ? slots.length > 1 : Number(previous) < slots.length;
+  audioSelect.value = audioSlot >= 0 ? String(audioSlot) : keep ? previous : '-1';
+  updateAudioHint();
 
   updateMergeState();
+}
+
+function updateAudioHint() {
+  const value = Number(audioSelect.value);
+  let text = '';
+  if (value === AUDIO_ALL) {
+    text =
+      '🎧 Cada cámara queda en su propia pista de audio, sin mezclarse. En VLC: menú Audio → Pista de audio → elige la cámara. En el reproductor de Windows: botón de idioma/audio.';
+  } else if (value >= 0) {
+    text = `🎧 El video descargado tendrá solo el audio de la cámara ${value + 1}. Puedes probar cuál se escucha mejor con el botón 🔇/🔊 de cada cámara.`;
+  }
+  $('audio-hint').textContent = text;
 }
 
 function buildEmptyTile(index) {
@@ -671,7 +692,16 @@ async function merge() {
       else setMergeStatus(`Uniendo videos… ${j.progress}%`, 50 + j.progress / 2);
     });
 
-    setMergeStatus(`¡Listo! ${job.fileName}`, 100, 'success');
+    const tracks = job.audioTracks || [];
+    const audioNote =
+      Number(audioSelect.value) === -1
+        ? 'sin audio'
+        : tracks.length === 0
+          ? 'sin audio (la cámara elegida no tiene sonido)'
+          : tracks.length === 1
+            ? `audio de la cámara ${tracks[0]}`
+            : `audio en pistas separadas: cámaras ${tracks.join(', ')}`;
+    setMergeStatus(`¡Listo! ${job.fileName} — ${audioNote}`, 100, 'success');
     download.href = job.downloadUrl;
     download.setAttribute('download', job.fileName);
     download.hidden = false;
@@ -740,6 +770,7 @@ layoutSelect.addEventListener('change', () => {
   render();
 });
 fillCheck.addEventListener('change', render);
+audioSelect.addEventListener('change', updateAudioHint);
 $('snapshot-btn').addEventListener('click', snapshot);
 $('fullscreen-btn').addEventListener('click', () => {
   if (document.fullscreenElement) document.exitFullscreen();

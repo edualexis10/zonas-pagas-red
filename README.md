@@ -16,6 +16,7 @@ Abre `http://localhost:3000`:
   - **Desde enlaces**: pega uno o varios enlaces (uno por línea) en la barra 🔗 y pulsa *Cargar enlaces*. Acepta enlaces directos a videos, de **Google Drive** y de **Dropbox** (el archivo debe estar compartido como "cualquier persona con el enlace"). El servidor descarga el video y lo trata como uno subido.
   - **Retraso por cámara** (⏱): si las grabaciones no empiezan a la misma hora, ajusta los segundos para alinearlas. 🔇/🔊 elige qué cámara se escucha.
   - **Unir y descargar**: genera un MP4 con todas las cámaras en cuadrícula (misma distribución, retrasos y audio elegido que el visor), en HD, Full HD, 2K o 4K, y lo descarga automáticamente.
+    - **Audio del video**: los audios nunca se mezclan. Elige *Sin audio*, *Solo cámara N*, o *Todas, en pistas separadas*: cada cámara queda como una pista de audio con su nombre ("Cámara 1", "Cámara 2"…) y eliges cuál escuchar en el reproductor (en VLC: Audio → Pista de audio).
 - **Conversor** (`/convertir.html`): sube uno o varios videos, elige el formato de salida (MP4 por defecto) y descarga cada resultado cuando esté listo.
 
 ## Cómo funciona
