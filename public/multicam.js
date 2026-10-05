@@ -1,0 +1,714 @@
+const MAX_CAMERAS = 8;
+const CHUNK_SIZE = 4 * 1024 * 1024; // 4 MB
+const MIN_CHUNK_SIZE = 256 * 1024;
+const NATIVE_TIMEOUT_MS = 6000;
+const FRAME_STEP = 1 / 25;
+// Extensiones que los navegadores no reproducen: se convierten en el servidor
+// directamente, sin intentar abrirlas antes.
+const SERVER_ONLY_EXT = ['avi', 'dav', '264', 'h264', '265', 'h265', 'hevc', 'flv', 'wmv', 'asf', 'mpg', 'mpeg', 'vob', 'ts', 'mts', 'm2ts', '3gp'];
+const PREVIEW_FORMAT = document.createElement('video').canPlayType('video/mp4; codecs="avc1.42E01E"')
+  ? 'mp4'
+  : 'webm';
+const AUTO_LAYOUTS = [[1, 1], [1, 1], [2, 1], [2, 2], [2, 2], [3, 2], [3, 2], [4, 2], [4, 2]];
+
+const $ = (id) => document.getElementById(id);
+const gridEl = $('grid');
+const fileInput = $('file-input');
+const playBtn = $('play-btn');
+const timeline = $('timeline');
+const timeLabel = $('time-label');
+const speedSelect = $('speed-select');
+const layoutSelect = $('layout-select');
+const fillCheck = $('fill-check');
+const audioSelect = $('audio-select');
+const mergeBtn = $('merge-btn');
+
+let slots = []; // { id, file, name, delay, duration, ready, video, tile, statusEl, url, objectUrl, fileIdPromise, audio }
+let nextId = 1;
+let clock = 0; // tiempo del visor (s); cada cámara muestra clock - delay
+let playing = false;
+let rate = 1;
+let lastFrameTs = null;
+let lastSync = 0;
+let focusedId = null;
+let pendingTarget = null; // índice de celda vacía donde agregar el próximo video
+
+// ---------------------------------------------------------------------------
+// Utilidades
+// ---------------------------------------------------------------------------
+
+function formatTime(seconds) {
+  const s = Math.max(0, Math.floor(seconds));
+  const h = Math.floor(s / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = s % 60;
+  const mm = String(m).padStart(2, '0');
+  const ss = String(sec).padStart(2, '0');
+  return h > 0 ? `${h}:${mm}:${ss}` : `${mm}:${ss}`;
+}
+
+function extOf(name) {
+  const dot = name.lastIndexOf('.');
+  return dot >= 0 ? name.slice(dot + 1).toLowerCase() : '';
+}
+
+async function readJson(response) {
+  const contentType = response.headers.get('content-type') || '';
+  if (!contentType.includes('application/json')) {
+    const err = new Error(`HTTP ${response.status}`);
+    err.status = response.status;
+    throw err;
+  }
+  const data = await response.json();
+  if (!response.ok) {
+    const err = new Error(data.error || `HTTP ${response.status}`);
+    err.status = response.status;
+    throw err;
+  }
+  return data;
+}
+
+function postJson(url, body) {
+  return fetch(url, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  }).then(readJson);
+}
+
+function triggerDownload(url, fileName) {
+  const a = $('download-helper');
+  a.href = url;
+  a.download = fileName || '';
+  a.click();
+}
+
+// ---------------------------------------------------------------------------
+// Subida en fragmentos (igual que el conversor: evita límites del proxy)
+// ---------------------------------------------------------------------------
+
+async function uploadStored(file, onProgress) {
+  const { uploadId } = await postJson('/api/upload/init', { fileName: file.name, purpose: 'store' });
+  let sent = 0;
+  let fileId = null;
+
+  async function sendRange(start, end, isLast) {
+    const size = end - start;
+    try {
+      const formData = new FormData();
+      formData.append('uploadId', uploadId);
+      formData.append('isLast', String(isLast));
+      formData.append('chunk', file.slice(start, end));
+      const result = await fetch('/api/upload/chunk', { method: 'POST', body: formData }).then(readJson);
+      sent += size;
+      onProgress(Math.min(99, Math.round((sent / file.size) * 100)));
+      if (result.done) fileId = result.fileId;
+    } catch (err) {
+      if (size <= MIN_CHUNK_SIZE || (err.status && err.status < 500 && err.status !== 413)) throw err;
+      const mid = start + Math.floor(size / 2);
+      await sendRange(start, mid, false);
+      await sendRange(mid, end, isLast);
+    }
+  }
+
+  if (file.size === 0) throw new Error('El archivo está vacío.');
+  for (let offset = 0; offset < file.size; offset += CHUNK_SIZE) {
+    const end = Math.min(offset + CHUNK_SIZE, file.size);
+    await sendRange(offset, end, end >= file.size);
+  }
+  return fileId;
+}
+
+// Sube el original una sola vez y reutiliza el id (vista previa + mosaico).
+function ensureUploaded(slot, onProgress) {
+  if (!slot.fileIdPromise) {
+    slot.fileIdPromise = uploadStored(slot.file, onProgress).catch((err) => {
+      slot.fileIdPromise = null;
+      throw err;
+    });
+  }
+  return slot.fileIdPromise;
+}
+
+function waitForJob(jobId, onProgress) {
+  return new Promise((resolve, reject) => {
+    const timer = setInterval(async () => {
+      try {
+        const job = await fetch(`/api/jobs/${jobId}`).then(readJson);
+        if (job.status === 'done') {
+          clearInterval(timer);
+          resolve(job);
+        } else if (job.status === 'error') {
+          clearInterval(timer);
+          reject(new Error(job.error || 'Error al procesar.'));
+        } else {
+          onProgress(job);
+        }
+      } catch (err) {
+        clearInterval(timer);
+        reject(err);
+      }
+    }, 800);
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Cámaras
+// ---------------------------------------------------------------------------
+
+function addFiles(fileList) {
+  const files = Array.from(fileList).filter((f) => f && f.size !== undefined);
+  const free = MAX_CAMERAS - slots.length;
+  if (files.length > free) {
+    alert(`Solo caben ${MAX_CAMERAS} cámaras. Se agregarán ${Math.max(0, free)} de ${files.length} videos.`);
+  }
+  files.slice(0, Math.max(0, free)).forEach((file) => {
+    const slot = createSlot(file);
+    if (pendingTarget !== null && pendingTarget < slots.length) {
+      slots.splice(pendingTarget, 0, slot);
+      pendingTarget += 1;
+    } else {
+      slots.push(slot);
+    }
+    loadSlot(slot);
+  });
+  pendingTarget = null;
+  render();
+}
+
+function createSlot(file) {
+  const id = nextId++;
+  const video = document.createElement('video');
+  video.muted = true;
+  video.playsInline = true;
+  video.preload = 'auto';
+  return {
+    id,
+    file,
+    name: file.name,
+    delay: 0,
+    duration: 0,
+    ready: false,
+    video,
+    tile: null,
+    statusEl: null,
+    objectUrl: null,
+    fileIdPromise: null,
+    audio: false,
+  };
+}
+
+function setSlotStatus(slot, text, isError) {
+  slot.statusText = text;
+  slot.statusError = !!isError;
+  if (slot.statusEl) {
+    slot.statusEl.textContent = text || '';
+    slot.statusEl.hidden = !text;
+    slot.statusEl.classList.toggle('error', !!isError);
+  }
+}
+
+function loadSlot(slot) {
+  if (SERVER_ONLY_EXT.includes(extOf(slot.name))) {
+    loadViaServer(slot);
+    return;
+  }
+
+  setSlotStatus(slot, 'Abriendo…');
+  slot.objectUrl = URL.createObjectURL(slot.file);
+  const video = slot.video;
+  let settled = false;
+
+  const fallback = () => {
+    if (settled) return;
+    settled = true;
+    cleanup();
+    video.removeAttribute('src');
+    video.load();
+    loadViaServer(slot);
+  };
+  const ok = () => {
+    // Algunos navegadores "abren" HEVC sin poder decodificarlo: sin ancho de video.
+    if (settled) return;
+    if (!video.videoWidth) return fallback();
+    settled = true;
+    cleanup();
+    markReady(slot);
+  };
+  const timer = setTimeout(fallback, NATIVE_TIMEOUT_MS);
+  function cleanup() {
+    clearTimeout(timer);
+    video.removeEventListener('loadeddata', ok);
+    video.removeEventListener('error', fallback);
+  }
+  video.addEventListener('loadeddata', ok);
+  video.addEventListener('error', fallback);
+  video.src = slot.objectUrl;
+}
+
+async function loadViaServer(slot) {
+  try {
+    setSlotStatus(slot, 'Subiendo para convertir… 0%');
+    const fileId = await ensureUploaded(slot, (pct) => {
+      if (!slot.removed) setSlotStatus(slot, `Subiendo para convertir… ${pct}%`);
+    });
+    if (slot.removed) return;
+    setSlotStatus(slot, 'Convirtiendo para reproducir…');
+    const { jobId } = await postJson('/api/preview', { fileId, format: PREVIEW_FORMAT });
+    const job = await waitForJob(jobId, (j) => {
+      if (slot.removed) return;
+      setSlotStatus(slot, j.status === 'queued' ? 'En cola…' : `Convirtiendo para reproducir… ${j.progress}%`);
+    });
+    if (slot.removed) return;
+    slot.video.addEventListener('loadeddata', () => markReady(slot), { once: true });
+    slot.video.addEventListener(
+      'error',
+      () => setSlotStatus(slot, 'No se pudo reproducir este video.', true),
+      { once: true }
+    );
+    slot.video.src = job.mediaUrl;
+  } catch (err) {
+    setSlotStatus(slot, err.message || 'Error al cargar el video.', true);
+  }
+}
+
+function markReady(slot) {
+  if (slot.removed) return;
+  slot.ready = true;
+  slot.duration = Number.isFinite(slot.video.duration) ? slot.video.duration : 0;
+  setSlotStatus(slot, '');
+  syncAll(true);
+  updateTimeline();
+  updateMergeState();
+}
+
+function removeSlot(id) {
+  const idx = slots.findIndex((s) => s.id === id);
+  if (idx < 0) return;
+  const [slot] = slots.splice(idx, 1);
+  slot.removed = true;
+  slot.video.pause();
+  slot.video.removeAttribute('src');
+  slot.video.load();
+  if (slot.objectUrl) URL.revokeObjectURL(slot.objectUrl);
+  if (focusedId === id) focusedId = null;
+  render();
+  updateTimeline();
+}
+
+function moveSlot(id, dir) {
+  const idx = slots.findIndex((s) => s.id === id);
+  const to = idx + dir;
+  if (idx < 0 || to < 0 || to >= slots.length) return;
+  [slots[idx], slots[to]] = [slots[to], slots[idx]];
+  render();
+}
+
+function setAudio(id) {
+  slots.forEach((s) => {
+    s.audio = s.id === id ? !s.audio : false;
+    s.video.muted = !s.audio;
+  });
+  render();
+}
+
+// ---------------------------------------------------------------------------
+// Grilla
+// ---------------------------------------------------------------------------
+
+function currentLayout() {
+  if (focusedId !== null) return [1, 1];
+  const value = layoutSelect.value;
+  if (value !== 'auto') return value.split('x').map(Number);
+  return AUTO_LAYOUTS[Math.max(slots.length, 4)] || [4, 2];
+}
+
+// Distribución para el mosaico: la elegida, o la mínima que quepa.
+function mergeLayout() {
+  const value = layoutSelect.value;
+  if (value !== 'auto') {
+    const [c, r] = value.split('x').map(Number);
+    if (c * r >= slots.length) return [c, r];
+  }
+  return AUTO_LAYOUTS[slots.length] || [4, 2];
+}
+
+function render() {
+  const [cols, rows] = currentLayout();
+  gridEl.style.setProperty('--cols', cols);
+  gridEl.style.setProperty('--rows', rows);
+  gridEl.classList.toggle('fill', fillCheck.checked);
+  gridEl.innerHTML = '';
+
+  const visible = focusedId !== null ? slots.filter((s) => s.id === focusedId) : slots;
+  const cells = Math.max(cols * rows, visible.length);
+
+  for (let i = 0; i < cells; i++) {
+    const slot = visible[i];
+    if (slot) {
+      gridEl.appendChild(buildTile(slot, slots.indexOf(slot)));
+    } else if (focusedId === null) {
+      gridEl.appendChild(buildEmptyTile(i));
+    }
+  }
+
+  // Lista de audio para el mosaico.
+  const previous = audioSelect.value;
+  audioSelect.innerHTML = '<option value="-1">Sin audio</option>';
+  slots.forEach((s, i) => {
+    const opt = document.createElement('option');
+    opt.value = String(i);
+    opt.textContent = `Cámara ${i + 1}`;
+    audioSelect.appendChild(opt);
+  });
+  const audioSlot = slots.findIndex((s) => s.audio);
+  audioSelect.value = audioSlot >= 0 ? String(audioSlot) : Number(previous) < slots.length ? previous : '-1';
+
+  updateMergeState();
+}
+
+function buildEmptyTile(index) {
+  const tile = document.createElement('div');
+  tile.className = 'tile empty';
+  if (index >= MAX_CAMERAS) {
+    tile.classList.add('disabled');
+    return tile;
+  }
+  tile.innerHTML = `<span>+ Cámara ${index + 1}</span><small>Clic o arrastra un video</small>`;
+  tile.addEventListener('click', () => {
+    pendingTarget = Math.min(index, slots.length);
+    fileInput.click();
+  });
+  return tile;
+}
+
+function buildTile(slot, index) {
+  const tile = document.createElement('div');
+  tile.className = 'tile';
+  if (slot.audio) tile.classList.add('has-audio');
+
+  tile.appendChild(slot.video);
+
+  const status = document.createElement('div');
+  status.className = 'tile-status';
+  slot.statusEl = status;
+  setSlotStatus(slot, slot.statusText, slot.statusError);
+  tile.appendChild(status);
+
+  const bar = document.createElement('div');
+  bar.className = 'tile-bar';
+  bar.innerHTML = `
+    <span class="cam-label" title="${escapeHtml(slot.name)}">CAM ${index + 1} · ${escapeHtml(slot.name)}</span>
+    <span class="tile-tools">
+      <label title="Retraso en segundos: positivo = esta cámara empieza después; negativo = se recorta su inicio">
+        ⏱<input type="number" step="0.1" value="${slot.delay}" class="delay-input" />s
+      </label>
+      <button type="button" data-act="audio" title="Escuchar el audio de esta cámara">${slot.audio ? '🔊' : '🔇'}</button>
+      <button type="button" data-act="left" title="Mover antes">◀</button>
+      <button type="button" data-act="right" title="Mover después">▶</button>
+      <button type="button" data-act="focus" title="Ampliar / volver a la grilla">${focusedId === slot.id ? '▦' : '⤢'}</button>
+      <button type="button" data-act="remove" title="Quitar">✕</button>
+    </span>
+  `;
+  tile.appendChild(bar);
+
+  const delayInput = bar.querySelector('.delay-input');
+  delayInput.addEventListener('change', () => {
+    slot.delay = Number(delayInput.value) || 0;
+    updateTimeline();
+    syncAll(true);
+  });
+  bar.querySelectorAll('button').forEach((btn) => {
+    btn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const act = btn.dataset.act;
+      if (act === 'audio') setAudio(slot.id);
+      if (act === 'left') moveSlot(slot.id, -1);
+      if (act === 'right') moveSlot(slot.id, 1);
+      if (act === 'remove') removeSlot(slot.id);
+      if (act === 'focus') toggleFocus(slot.id);
+    });
+  });
+  slot.video.ondblclick = () => toggleFocus(slot.id);
+
+  // Al reinsertar el elemento en el DOM se pausa: lo reanudamos si corresponde.
+  if (playing) requestAnimationFrame(() => syncAll(true));
+  return tile;
+}
+
+function toggleFocus(id) {
+  focusedId = focusedId === id ? null : id;
+  render();
+}
+
+function escapeHtml(text) {
+  return String(text).replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
+}
+
+// ---------------------------------------------------------------------------
+// Reproducción sincronizada
+// ---------------------------------------------------------------------------
+
+function totalDuration() {
+  return slots.reduce((max, s) => (s.ready ? Math.max(max, s.delay + s.duration) : max), 0);
+}
+
+function updateTimeline() {
+  const total = totalDuration();
+  timeline.max = String(total);
+  if (clock > total) clock = total;
+  timeline.value = String(clock);
+  timeLabel.textContent = `${formatTime(clock)} / ${formatTime(total)}`;
+}
+
+// Ajusta cada video a "clock - retraso". Con force=true salta siempre a la
+// posición exacta (al buscar); si no, solo corrige cuando se desfasa.
+function syncAll(force) {
+  slots.forEach((slot) => {
+    if (!slot.ready) return;
+    const v = slot.video;
+    const target = clock - slot.delay;
+    const inRange = target >= 0 && target < slot.duration - 0.05;
+    const clamped = Math.max(0, Math.min(target, Math.max(0, slot.duration - 0.05)));
+
+    if (Math.abs(v.playbackRate - rate) > 0.001) v.playbackRate = rate;
+
+    if (playing && inRange) {
+      const tolerance = 0.3 * Math.max(1, rate);
+      if (force || Math.abs(v.currentTime - target) > tolerance) v.currentTime = target;
+      if (v.paused) v.play().catch(() => {});
+    } else {
+      if (!v.paused) v.pause();
+      if (force || Math.abs(v.currentTime - clamped) > 0.05) v.currentTime = clamped;
+    }
+  });
+}
+
+function tick(ts) {
+  if (playing) {
+    if (lastFrameTs !== null) clock += ((ts - lastFrameTs) / 1000) * rate;
+    const total = totalDuration();
+    if (clock >= total) {
+      clock = total;
+      setPlaying(false);
+    }
+    if (ts - lastSync > 250) {
+      lastSync = ts;
+      syncAll(false);
+    }
+    timeline.value = String(clock);
+    timeLabel.textContent = `${formatTime(clock)} / ${formatTime(total)}`;
+  }
+  lastFrameTs = ts;
+  requestAnimationFrame(tick);
+}
+
+function setPlaying(value) {
+  const anyReady = slots.some((s) => s.ready);
+  playing = value && anyReady;
+  if (playing && clock >= totalDuration() - 0.05) clock = 0;
+  playBtn.textContent = playing ? '⏸' : '▶';
+  syncAll(true);
+}
+
+function seek(time) {
+  clock = Math.max(0, Math.min(time, totalDuration()));
+  updateTimeline();
+  syncAll(true);
+}
+
+// ---------------------------------------------------------------------------
+// Captura y mosaico
+// ---------------------------------------------------------------------------
+
+function snapshot() {
+  const ready = slots.filter((s) => s.ready);
+  if (ready.length === 0) return;
+  const [cols, rows] = mergeLayout();
+  const cellW = 640;
+  const cellH = 360;
+  const canvas = document.createElement('canvas');
+  canvas.width = cols * cellW;
+  canvas.height = rows * cellH;
+  const ctx = canvas.getContext('2d');
+  ctx.fillStyle = '#000';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+  slots.forEach((slot, i) => {
+    if (!slot.ready || !slot.video.videoWidth) return;
+    const x = (i % cols) * cellW;
+    const y = Math.floor(i / cols) * cellH;
+    const scale = Math.min(cellW / slot.video.videoWidth, cellH / slot.video.videoHeight);
+    const w = slot.video.videoWidth * scale;
+    const h = slot.video.videoHeight * scale;
+    ctx.drawImage(slot.video, x + (cellW - w) / 2, y + (cellH - h) / 2, w, h);
+  });
+
+  canvas.toBlob((blob) => {
+    const url = URL.createObjectURL(blob);
+    triggerDownload(url, `captura-${formatTime(clock).replace(/:/g, '-')}.png`);
+    setTimeout(() => URL.revokeObjectURL(url), 5000);
+  }, 'image/png');
+}
+
+function updateMergeState() {
+  mergeBtn.disabled = slots.length === 0 || mergeBtn.dataset.busy === '1';
+}
+
+function setMergeStatus(text, pct, type) {
+  $('merge-status').hidden = false;
+  const textEl = $('merge-status-text');
+  textEl.textContent = text;
+  textEl.className = `merge-status-text ${type || ''}`;
+  if (pct !== null && pct !== undefined) $('merge-progress').style.width = `${pct}%`;
+  $('merge-progress').classList.toggle('error', type === 'error');
+}
+
+async function merge() {
+  if (slots.length === 0) return;
+  const current = slots.slice();
+  const download = $('merge-download');
+  download.hidden = true;
+  mergeBtn.dataset.busy = '1';
+  updateMergeState();
+
+  try {
+    // Sube los originales que aún no estén en el servidor (en paralelo).
+    const progress = current.map(() => 0);
+    const report = () => {
+      const avg = Math.round(progress.reduce((a, b) => a + b, 0) / current.length);
+      setMergeStatus(`Subiendo videos… ${avg}%`, avg * 0.5);
+    };
+    report();
+    const fileIds = await Promise.all(
+      current.map((slot, i) =>
+        ensureUploaded(slot, (pct) => {
+          progress[i] = pct;
+          report();
+        }).then((id) => {
+          progress[i] = 100;
+          report();
+          return id;
+        })
+      )
+    );
+
+    const [cols, rows] = mergeLayout();
+    // Solo sirve para mostrar el progreso: si falta alguna duración, se omite.
+    const expectedDuration = current.every((s) => s.ready && s.duration)
+      ? current.reduce((max, s) => Math.max(max, s.delay + s.duration), 0)
+      : 0;
+    const { jobId } = await postJson('/api/mosaic', {
+      items: current.map((slot, i) => ({ fileId: fileIds[i], delay: slot.delay })),
+      cols,
+      rows,
+      width: Number($('width-select').value),
+      fps: Number($('fps-select').value),
+      audioIndex: Number(audioSelect.value),
+      expectedDuration,
+    });
+
+    setMergeStatus('Uniendo videos…', 50);
+    const job = await waitForJob(jobId, (j) => {
+      if (j.status === 'queued') setMergeStatus('En cola…', 50);
+      else setMergeStatus(`Uniendo videos… ${j.progress}%`, 50 + j.progress / 2);
+    });
+
+    setMergeStatus(`¡Listo! ${job.fileName}`, 100, 'success');
+    download.href = job.downloadUrl;
+    download.setAttribute('download', job.fileName);
+    download.hidden = false;
+    triggerDownload(job.downloadUrl, job.fileName);
+  } catch (err) {
+    setMergeStatus(err.message || 'Error al unir los videos.', 100, 'error');
+  } finally {
+    delete mergeBtn.dataset.busy;
+    updateMergeState();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Eventos
+// ---------------------------------------------------------------------------
+
+fileInput.addEventListener('change', () => {
+  addFiles(fileInput.files);
+  fileInput.value = '';
+});
+fileInput.addEventListener('cancel', () => {
+  pendingTarget = null;
+});
+
+$('clear-btn').addEventListener('click', () => {
+  slots.slice().forEach((s) => removeSlot(s.id));
+  setPlaying(false);
+  clock = 0;
+  updateTimeline();
+});
+
+playBtn.addEventListener('click', () => setPlaying(!playing));
+$('back-btn').addEventListener('click', () => seek(clock - 10));
+$('fwd-btn').addEventListener('click', () => seek(clock + 10));
+$('frame-back-btn').addEventListener('click', () => {
+  setPlaying(false);
+  seek(clock - FRAME_STEP);
+});
+$('frame-fwd-btn').addEventListener('click', () => {
+  setPlaying(false);
+  seek(clock + FRAME_STEP);
+});
+timeline.addEventListener('input', () => seek(Number(timeline.value)));
+speedSelect.addEventListener('change', () => {
+  rate = Number(speedSelect.value);
+  syncAll(true);
+});
+layoutSelect.addEventListener('change', () => {
+  focusedId = null;
+  render();
+});
+fillCheck.addEventListener('change', render);
+$('snapshot-btn').addEventListener('click', snapshot);
+$('fullscreen-btn').addEventListener('click', () => {
+  if (document.fullscreenElement) document.exitFullscreen();
+  else gridEl.requestFullscreen().catch(() => {});
+});
+mergeBtn.addEventListener('click', merge);
+
+document.addEventListener('keydown', (e) => {
+  if (e.target.matches('input, select, textarea')) return;
+  if (e.code === 'Space') {
+    e.preventDefault();
+    setPlaying(!playing);
+  } else if (e.key === 'ArrowLeft') seek(clock - 10);
+  else if (e.key === 'ArrowRight') seek(clock + 10);
+  else if (e.key === ',') {
+    setPlaying(false);
+    seek(clock - FRAME_STEP);
+  } else if (e.key === '.') {
+    setPlaying(false);
+    seek(clock + FRAME_STEP);
+  } else if (e.key === 'Escape' && focusedId !== null) toggleFocus(focusedId);
+});
+
+const overlay = $('drop-overlay');
+let dragDepth = 0;
+document.addEventListener('dragenter', (e) => {
+  if (!e.dataTransfer || !Array.from(e.dataTransfer.types).includes('Files')) return;
+  dragDepth += 1;
+  overlay.hidden = false;
+});
+document.addEventListener('dragleave', () => {
+  dragDepth = Math.max(0, dragDepth - 1);
+  if (dragDepth === 0) overlay.hidden = true;
+});
+document.addEventListener('dragover', (e) => e.preventDefault());
+document.addEventListener('drop', (e) => {
+  e.preventDefault();
+  dragDepth = 0;
+  overlay.hidden = true;
+  if (e.dataTransfer && e.dataTransfer.files.length) addFiles(e.dataTransfer.files);
+});
+
+render();
+updateTimeline();
+requestAnimationFrame(tick);

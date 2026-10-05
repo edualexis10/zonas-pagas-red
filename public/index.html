@@ -3,37 +3,104 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Conversor de Videos</title>
-  <link rel="stylesheet" href="style.css" />
+  <title>Visor Multicámara</title>
+  <link rel="stylesheet" href="multicam.css" />
 </head>
 <body>
-  <main class="card">
-    <h1>Conversor de Videos</h1>
-    <p class="subtitle">Sube uno o varios videos, de cualquier tamaño, y conviértelos en paralelo al formato que necesites.</p>
+  <header class="topbar">
+    <div class="brand">
+      <h1>Visor Multicámara</h1>
+      <span class="hint">Hasta 8 cámaras sincronizadas · cualquier formato</span>
+    </div>
+    <div class="topbar-actions">
+      <label class="btn primary" for="file-input">+ Agregar videos</label>
+      <input type="file" id="file-input" accept="video/*,.dav,.264,.h264,.265,.h265,.hevc,.avi,.mkv,.ts,.mts,.m2ts,.flv,.wmv,.asf,.3gp,.mpg,.mpeg,.vob,.mov,.mp4,.webm" multiple hidden />
+      <button type="button" class="btn ghost" id="clear-btn">Quitar todos</button>
+      <a class="btn ghost" href="convertir.html">Conversor</a>
+    </div>
+  </header>
 
-    <form id="convert-form">
-      <label class="dropzone" id="dropzone" for="video-input">
-        <span id="file-label">Arrastra uno o varios videos aquí o haz clic para elegirlos</span>
-        <input type="file" id="video-input" name="videos" accept="video/*" multiple hidden />
-      </label>
+  <main id="drop-area">
+    <section id="grid" class="grid" style="--cols: 2; --rows: 2"></section>
 
-      <label for="format-select">Formato de salida</label>
-      <select id="format-select" name="format">
-        <option value="mp4" selected>MP4</option>
-        <option value="avi">AVI</option>
-        <option value="mov">MOV</option>
-        <option value="mkv">MKV</option>
-        <option value="webm">WEBM</option>
-        <option value="gif">GIF</option>
-      </select>
+    <section class="controls">
+      <div class="transport">
+        <button type="button" class="btn icon" id="back-btn" title="Retroceder 10 s (←)">⏪</button>
+        <button type="button" class="btn icon" id="frame-back-btn" title="Cuadro anterior (,)">⏮</button>
+        <button type="button" class="btn icon play" id="play-btn" title="Reproducir / pausar (espacio)">▶</button>
+        <button type="button" class="btn icon" id="frame-fwd-btn" title="Cuadro siguiente (.)">⏭</button>
+        <button type="button" class="btn icon" id="fwd-btn" title="Adelantar 10 s (→)">⏩</button>
+        <span class="time" id="time-label">00:00 / 00:00</span>
+      </div>
+      <input type="range" id="timeline" min="0" max="0" step="0.01" value="0" />
+      <div class="options">
+        <label>Velocidad
+          <select id="speed-select">
+            <option value="0.25">0.25×</option>
+            <option value="0.5">0.5×</option>
+            <option value="1" selected>1×</option>
+            <option value="2">2×</option>
+            <option value="4">4×</option>
+            <option value="8">8×</option>
+            <option value="16">16×</option>
+          </select>
+        </label>
+        <label>Distribución
+          <select id="layout-select">
+            <option value="auto" selected>Automática</option>
+            <option value="1x1">1 (1×1)</option>
+            <option value="2x1">2 (2×1)</option>
+            <option value="2x2">4 (2×2)</option>
+            <option value="3x2">6 (3×2)</option>
+            <option value="4x2">8 (4×2)</option>
+            <option value="3x3">9 (3×3)</option>
+          </select>
+        </label>
+        <label class="check"><input type="checkbox" id="fill-check" /> Llenar celdas</label>
+        <button type="button" class="btn ghost" id="snapshot-btn" title="Guardar imagen del mosaico actual">📷 Captura</button>
+        <button type="button" class="btn ghost" id="fullscreen-btn">⛶ Pantalla completa</button>
+      </div>
+    </section>
 
-      <button type="submit" id="submit-btn">Convertir</button>
-    </form>
-
-    <div id="status" class="status" hidden></div>
-    <ul id="job-list" class="job-list"></ul>
+    <section class="merge">
+      <div class="merge-head">
+        <h2>Unir en un solo video</h2>
+        <p>Combina las cámaras cargadas en un mosaico, con la misma distribución y retrasos del visor, y descárgalo como MP4.</p>
+      </div>
+      <div class="merge-form">
+        <label>Resolución
+          <select id="width-select">
+            <option value="1280">HD (1280 px de ancho)</option>
+            <option value="1920" selected>Full HD (1920 px de ancho)</option>
+            <option value="2560">2K (2560 px de ancho)</option>
+            <option value="3840">4K (3840 px de ancho)</option>
+          </select>
+        </label>
+        <label>Cuadros por segundo
+          <select id="fps-select">
+            <option value="15">15</option>
+            <option value="25" selected>25</option>
+            <option value="30">30</option>
+          </select>
+        </label>
+        <label>Audio
+          <select id="audio-select">
+            <option value="-1">Sin audio</option>
+          </select>
+        </label>
+        <button type="button" class="btn primary" id="merge-btn" disabled>Unir y descargar</button>
+      </div>
+      <div class="merge-status" id="merge-status" hidden>
+        <div class="merge-status-text" id="merge-status-text"></div>
+        <div class="progress-track"><div class="progress-fill" id="merge-progress"></div></div>
+        <a class="btn success" id="merge-download" hidden>⬇ Descargar mosaico</a>
+      </div>
+    </section>
   </main>
 
-  <script src="app.js"></script>
+  <div class="drop-overlay" id="drop-overlay" hidden>Suelta los videos para agregarlos</div>
+  <a id="download-helper" hidden></a>
+
+  <script src="multicam.js"></script>
 </body>
 </html>
