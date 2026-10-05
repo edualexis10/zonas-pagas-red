@@ -19,7 +19,6 @@ const playBtn = $('play-btn');
 const timeline = $('timeline');
 const timeLabel = $('time-label');
 const speedSelect = $('speed-select');
-const layoutSelect = $('layout-select');
 const fillCheck = $('fill-check');
 const audioSelect = $('audio-select');
 const mergeBtn = $('merge-btn');
@@ -32,6 +31,8 @@ let rate = 1;
 let lastFrameTs = null;
 let lastSync = 0;
 let focusedId = null;
+let layoutChoice = 'auto'; // 'auto' o 'CxR' (número de pantallas elegido)
+let page = 0; // página de cámaras cuando hay más cámaras que pantallas
 let pendingTarget = null; // índice de celda vacía donde agregar el próximo video
 
 // ---------------------------------------------------------------------------
@@ -138,7 +139,7 @@ async function importUrl(slot, onProgress) {
   const job = await waitForJob(jobId, (j) => {
     if (j.status === 'processing') onProgress(j.progress, j.bytes);
   });
-  if (job.originalName && job.originalName !== slot.name) {
+  if (!slot.keepName && job.originalName && job.originalName !== slot.name) {
     slot.name = job.originalName;
     if (slot.labelEl) slot.labelEl.lastChild.textContent = slot.name;
   }
@@ -176,13 +177,87 @@ function addFiles(fileList) {
   addSources(files.map((file) => ({ file, name: file.name })));
 }
 
-function addUrls(text) {
+const FOLDER_RE = /drive\.google\.com\/(?:drive\/(?:u\/\d+\/)?folders\/|embeddedfolderview\?id=)/;
+
+async function addUrls(text) {
   const urls = String(text)
     .split(/[\s,]+/)
     .map((u) => u.trim())
     .filter((u) => /^https?:\/\//i.test(u));
-  addSources(urls.map((url) => ({ sourceUrl: url, name: nameFromUrl(url) })));
+  const folders = urls.filter((u) => FOLDER_RE.test(u));
+  const videos = urls.filter((u) => !FOLDER_RE.test(u));
+  addSources(videos.map((url) => ({ sourceUrl: url, name: nameFromUrl(url) })));
+
+  for (const folderUrl of folders) {
+    await addFolder(folderUrl);
+  }
   return urls.length;
+}
+
+// Carpeta de Drive: se listan sus videos y se reparten en las cámaras. Si son
+// más de los que caben, se deja elegir cuáles cargar.
+async function addFolder(folderUrl) {
+  const submit = $('link-form').querySelector('button');
+  submit.disabled = true;
+  submit.textContent = 'Leyendo carpeta…';
+  try {
+    const { files } = await postJson('/api/folder', { url: folderUrl });
+    const free = MAX_CAMERAS - slots.length;
+    if (free <= 0) {
+      alert(`Ya hay ${MAX_CAMERAS} cámaras cargadas. Quita alguna para agregar más.`);
+      return;
+    }
+    const chosen = files.length <= free ? files : await pickFolderFiles(files, free);
+    if (chosen.length) {
+      addSources(chosen.map((f) => ({ sourceUrl: f.url, name: f.name, keepName: true })));
+      if (layoutChoice !== 'auto' && chosen.length > 1) {
+        // Ajusta las pantallas a la cantidad cargada.
+        layoutChoice = 'auto';
+        render();
+      }
+    }
+  } catch (err) {
+    alert(`No se pudo leer la carpeta: ${err.message}`);
+  } finally {
+    submit.disabled = false;
+    submit.textContent = 'Cargar enlaces';
+  }
+}
+
+function pickFolderFiles(files, max) {
+  return new Promise((resolve) => {
+    const modal = $('folder-modal');
+    const list = $('folder-list');
+    const addBtn = $('folder-add');
+    list.innerHTML = '';
+    files.forEach((file, i) => {
+      const li = document.createElement('li');
+      li.innerHTML = `<label><input type="checkbox" value="${i}" ${i < max ? 'checked' : ''} /> <span></span></label>`;
+      li.querySelector('span').textContent = file.name;
+      list.appendChild(li);
+    });
+    const checks = Array.from(list.querySelectorAll('input'));
+    const update = () => {
+      const n = checks.filter((c) => c.checked).length;
+      $('folder-hint').textContent = `La carpeta tiene ${files.length} videos y caben ${max}. Elige cuáles ver (${n} de ${max}).`;
+      checks.forEach((c) => {
+        c.disabled = !c.checked && n >= max;
+      });
+      addBtn.disabled = n === 0;
+    };
+    list.onchange = update;
+    update();
+    modal.hidden = false;
+
+    const close = (result) => {
+      modal.hidden = true;
+      $('folder-cancel').onclick = null;
+      addBtn.onclick = null;
+      resolve(result);
+    };
+    $('folder-cancel').onclick = () => close([]);
+    addBtn.onclick = () => close(checks.filter((c) => c.checked).map((c) => files[Number(c.value)]));
+  });
 }
 
 function nameFromUrl(url) {
@@ -215,7 +290,7 @@ function addSources(sources) {
   render();
 }
 
-function createSlot({ file = null, sourceUrl = null, name }) {
+function createSlot({ file = null, sourceUrl = null, name, keepName = false }) {
   const id = nextId++;
   const video = document.createElement('video');
   video.muted = true;
@@ -226,6 +301,7 @@ function createSlot({ file = null, sourceUrl = null, name }) {
     file,
     sourceUrl,
     name,
+    keepName,
     delay: 0,
     duration: 0,
     ready: false,
@@ -368,39 +444,61 @@ function setAudio(id) {
 
 function currentLayout() {
   if (focusedId !== null) return [1, 1];
-  const value = layoutSelect.value;
-  if (value !== 'auto') return value.split('x').map(Number);
+  if (layoutChoice !== 'auto') return layoutChoice.split('x').map(Number);
   return AUTO_LAYOUTS[Math.max(slots.length, 4)] || [4, 2];
+}
+
+// En pantallas angostas (celular vertical) las columnas se reducen para que
+// cada cámara no quede diminuta: 4 → 2×2, 6 → 2×3, 8 → 2×4.
+function displayLayout() {
+  const [cols, rows] = currentLayout();
+  const portrait = window.matchMedia('(max-width: 700px) and (orientation: portrait)').matches;
+  if (portrait && cols > 2) return [2, Math.ceil((cols * rows) / 2)];
+  return [cols, rows];
 }
 
 // Distribución para el mosaico: la elegida, o la mínima que quepa.
 function mergeLayout() {
-  const value = layoutSelect.value;
-  if (value !== 'auto') {
-    const [c, r] = value.split('x').map(Number);
+  if (layoutChoice !== 'auto') {
+    const [c, r] = layoutChoice.split('x').map(Number);
     if (c * r >= slots.length) return [c, r];
   }
   return AUTO_LAYOUTS[slots.length] || [4, 2];
 }
 
 function render() {
-  const [cols, rows] = currentLayout();
+  const [cols, rows] = displayLayout();
+  const perPage = cols * rows;
   gridEl.style.setProperty('--cols', cols);
   gridEl.style.setProperty('--rows', rows);
   gridEl.classList.toggle('fill', fillCheck.checked);
   gridEl.innerHTML = '';
 
-  const visible = focusedId !== null ? slots.filter((s) => s.id === focusedId) : slots;
-  const cells = Math.max(cols * rows, visible.length);
+  // Si hay más cámaras que pantallas, se muestran por páginas.
+  const pages = focusedId !== null ? 1 : Math.max(1, Math.ceil(slots.length / perPage));
+  page = Math.min(page, pages - 1);
+  const start = focusedId !== null ? 0 : page * perPage;
+  const visible = focusedId !== null ? slots.filter((s) => s.id === focusedId) : slots.slice(start, start + perPage);
+  slots.forEach((s) => {
+    s.shown = visible.includes(s);
+  });
 
-  for (let i = 0; i < cells; i++) {
+  for (let i = 0; i < perPage; i++) {
     const slot = visible[i];
     if (slot) {
       gridEl.appendChild(buildTile(slot, slots.indexOf(slot)));
     } else if (focusedId === null) {
-      gridEl.appendChild(buildEmptyTile(i));
+      gridEl.appendChild(buildEmptyTile(start + i));
     }
   }
+
+  $('pager').hidden = pages <= 1;
+  $('page-label').textContent = `Cámaras ${start + 1}–${Math.min(start + perPage, slots.length)} de ${slots.length}`;
+  $('page-prev').disabled = page === 0;
+  $('page-next').disabled = page >= pages - 1;
+  document.querySelectorAll('#screens button').forEach((btn) => {
+    btn.classList.toggle('active', btn.dataset.layout === layoutChoice);
+  });
 
   // Lista de audio para el mosaico: nunca se mezclan las cámaras.
   const previous = audioSelect.value;
@@ -501,6 +599,11 @@ function buildTile(slot, index) {
     });
   });
   slot.video.ondblclick = () => toggleFocus(slot.id);
+  // En pantallas táctiles no hay "hover": un toque muestra/oculta los botones.
+  tile.addEventListener('click', (e) => {
+    if (e.target.closest('.tile-tools')) return;
+    if (window.matchMedia('(hover: none), (max-width: 700px)').matches) tile.classList.toggle('show-tools');
+  });
 
   // Al reinsertar el elemento en el DOM se pausa: lo reanudamos si corresponde.
   if (playing) requestAnimationFrame(() => syncAll(true));
@@ -544,7 +647,7 @@ function syncAll(force) {
 
     if (Math.abs(v.playbackRate - rate) > 0.001) v.playbackRate = rate;
 
-    if (playing && inRange) {
+    if (playing && inRange && slot.shown) {
       const tolerance = 0.3 * Math.max(1, rate);
       if (force || Math.abs(v.currentTime - target) > tolerance) v.currentTime = target;
       if (v.paused) v.play().catch(() => {});
@@ -719,13 +822,14 @@ async function merge() {
 // ---------------------------------------------------------------------------
 
 const linkInput = $('link-input');
-$('link-form').addEventListener('submit', (e) => {
+$('link-form').addEventListener('submit', async (e) => {
   e.preventDefault();
-  if (addUrls(linkInput.value) === 0) {
-    alert('Pega al menos un enlace que empiece con http:// o https://');
-    return;
-  }
+  const text = linkInput.value;
   linkInput.value = '';
+  if ((await addUrls(text)) === 0) {
+    linkInput.value = text;
+    alert('Pega al menos un enlace que empiece con http:// o https://');
+  }
 });
 linkInput.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.shiftKey) {
@@ -765,17 +869,51 @@ speedSelect.addEventListener('change', () => {
   rate = Number(speedSelect.value);
   syncAll(true);
 });
-layoutSelect.addEventListener('change', () => {
+$('screens').addEventListener('click', (e) => {
+  const btn = e.target.closest('button[data-layout]');
+  if (!btn) return;
+  layoutChoice = btn.dataset.layout;
   focusedId = null;
+  page = 0;
   render();
+  syncAll(true);
+});
+$('page-prev').addEventListener('click', () => {
+  page = Math.max(0, page - 1);
+  render();
+  syncAll(true);
+});
+$('page-next').addEventListener('click', () => {
+  page += 1;
+  render();
+  syncAll(true);
+});
+// Al girar el celular cambia la cantidad de columnas.
+window.matchMedia('(max-width: 700px) and (orientation: portrait)').addEventListener('change', () => {
+  render();
+  syncAll(true);
 });
 fillCheck.addEventListener('change', render);
 audioSelect.addEventListener('change', updateAudioHint);
 $('snapshot-btn').addEventListener('click', snapshot);
+// Pantalla completa real si el navegador la permite; en iPhone (que no la
+// permite para elementos de la página) se usa una vista a pantalla completa.
+function setPseudoFullscreen(on) {
+  document.body.classList.toggle('pseudo-full', on);
+  $('exit-full').hidden = !on;
+  render();
+  syncAll(true);
+}
 $('fullscreen-btn').addEventListener('click', () => {
-  if (document.fullscreenElement) document.exitFullscreen();
-  else gridEl.requestFullscreen().catch(() => {});
+  if (document.fullscreenElement) {
+    document.exitFullscreen();
+  } else if (document.fullscreenEnabled && gridEl.requestFullscreen) {
+    gridEl.requestFullscreen().catch(() => setPseudoFullscreen(true));
+  } else {
+    setPseudoFullscreen(true);
+  }
 });
+$('exit-full').addEventListener('click', () => setPseudoFullscreen(false));
 mergeBtn.addEventListener('click', merge);
 
 document.addEventListener('keydown', (e) => {
@@ -791,7 +929,8 @@ document.addEventListener('keydown', (e) => {
   } else if (e.key === '.') {
     setPlaying(false);
     seek(clock + FRAME_STEP);
-  } else if (e.key === 'Escape' && focusedId !== null) toggleFocus(focusedId);
+  } else if (e.key === 'Escape' && document.body.classList.contains('pseudo-full')) setPseudoFullscreen(false);
+  else if (e.key === 'Escape' && focusedId !== null) toggleFocus(focusedId);
 });
 
 const overlay = $('drop-overlay');

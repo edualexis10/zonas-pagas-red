@@ -2,7 +2,8 @@
 <html lang="es">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#111827" />
   <title>Visor Multicámara</title>
   <link rel="stylesheet" href="multicam.css" />
 </head>
@@ -21,12 +22,32 @@
   </header>
 
   <form class="link-bar" id="link-form">
-    <textarea id="link-input" rows="1" placeholder="🔗 Pega aquí uno o varios enlaces de videos (uno por línea): enlace directo, Google Drive o Dropbox"></textarea>
+    <textarea id="link-input" rows="1" placeholder="🔗 Pega enlaces de videos o de una carpeta de Google Drive (uno por línea)"></textarea>
     <button type="submit" class="btn primary">Cargar enlaces</button>
   </form>
 
   <main id="drop-area">
-    <section id="grid" class="grid" style="--cols: 2; --rows: 2"></section>
+    <section class="view-bar">
+      <div class="screens" id="screens" role="group" aria-label="Número de pantallas">
+        <span class="screens-label">Pantallas</span>
+        <button type="button" data-layout="auto" class="active">Auto</button>
+        <button type="button" data-layout="1x1">1</button>
+        <button type="button" data-layout="2x1">2</button>
+        <button type="button" data-layout="2x2">4</button>
+        <button type="button" data-layout="3x2">6</button>
+        <button type="button" data-layout="4x2">8</button>
+        <button type="button" data-layout="3x3">9</button>
+      </div>
+      <div class="pager" id="pager" hidden>
+        <button type="button" class="btn icon" id="page-prev" title="Cámaras anteriores">◀</button>
+        <span id="page-label"></span>
+        <button type="button" class="btn icon" id="page-next" title="Cámaras siguientes">▶</button>
+      </div>
+    </section>
+
+    <section id="grid" class="grid" style="--cols: 2; --rows: 2">
+    </section>
+    <button type="button" class="exit-full" id="exit-full" hidden>✕ Salir</button>
 
     <section class="controls">
       <div class="transport">
@@ -48,17 +69,6 @@
             <option value="4">4×</option>
             <option value="8">8×</option>
             <option value="16">16×</option>
-          </select>
-        </label>
-        <label>Distribución
-          <select id="layout-select">
-            <option value="auto" selected>Automática</option>
-            <option value="1x1">1 (1×1)</option>
-            <option value="2x1">2 (2×1)</option>
-            <option value="2x2">4 (2×2)</option>
-            <option value="3x2">6 (3×2)</option>
-            <option value="4x2">8 (4×2)</option>
-            <option value="3x3">9 (3×3)</option>
           </select>
         </label>
         <label class="check"><input type="checkbox" id="fill-check" /> Llenar celdas</label>
@@ -103,6 +113,18 @@
       </div>
     </section>
   </main>
+
+  <div class="modal" id="folder-modal" hidden>
+    <div class="modal-box">
+      <h2 id="folder-title">Videos de la carpeta</h2>
+      <p class="modal-hint" id="folder-hint"></p>
+      <ul class="folder-list" id="folder-list"></ul>
+      <div class="modal-actions">
+        <button type="button" class="btn ghost" id="folder-cancel">Cancelar</button>
+        <button type="button" class="btn primary" id="folder-add">Agregar</button>
+      </div>
+    </div>
+  </div>
 
   <div class="drop-overlay" id="drop-overlay" hidden>Suelta los videos para agregarlos</div>
   <a id="download-helper" hidden></a>

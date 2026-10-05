@@ -397,6 +397,82 @@ function driveConfirmUrl(html, baseUrl) {
   return target.toString();
 }
 
+// ---------------------------------------------------------------------------
+// Carpetas públicas de Google Drive: lista sus videos (y los de sus
+// subcarpetas, p. ej. una por canal del DVR) para cargarlos como cámaras.
+// ---------------------------------------------------------------------------
+
+const VIDEO_EXTS = ['mp4', 'm4v', 'mov', 'avi', 'mkv', 'webm', 'dav', '264', 'h264', '265', 'h265', 'hevc', 'flv', 'wmv', 'asf', 'mpg', 'mpeg', 'vob', 'ts', 'mts', 'm2ts', '3gp'];
+const MAX_FOLDER_FILES = 200;
+
+function driveFolderId(raw) {
+  const match = String(raw || '').match(/drive\.google\.com\/(?:drive\/(?:u\/\d+\/)?folders\/|embeddedfolderview\?id=)([\w-]+)/);
+  return match ? match[1] : null;
+}
+
+function decodeHtml(text) {
+  return text
+    .replace(/&#(\d+);/g, (_, n) => String.fromCharCode(Number(n)))
+    .replace(/&#x([0-9a-f]+);/gi, (_, n) => String.fromCharCode(parseInt(n, 16)))
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;|&apos;/g, "'")
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&amp;/g, '&');
+}
+
+// Extrae archivos y subcarpetas de la vista "embeddedfolderview" de Drive.
+function parseDriveFolderHtml(html) {
+  const entries = [];
+  const re = /<a href="([^"]+)"[^>]*>[\s\S]*?<div class="flip-entry-title">([\s\S]*?)<\/div>/g;
+  let m;
+  while ((m = re.exec(html))) {
+    const href = decodeHtml(m[1]);
+    const name = decodeHtml(m[2]).trim();
+    const file = href.match(/\/file\/d\/([\w-]+)/);
+    const folder = href.match(/\/folders\/([\w-]+)/);
+    if (file) entries.push({ type: 'file', id: file[1], name });
+    else if (folder) entries.push({ type: 'folder', id: folder[1], name });
+  }
+  return entries;
+}
+
+function looksLikeVideo(name) {
+  const dot = name.lastIndexOf('.');
+  if (dot < 0) return true; // los DVR a veces exportan sin extensión
+  return VIDEO_EXTS.includes(name.slice(dot + 1).toLowerCase());
+}
+
+async function listDriveFolder(folderId, prefix = '', depth = 0, out = []) {
+  const response = await fetch(`https://drive.google.com/embeddedfolderview?id=${encodeURIComponent(folderId)}`, {
+    headers: { 'User-Agent': 'Mozilla/5.0 (VisorMulticamara)' },
+  });
+  const html = response.ok ? await response.text() : '';
+  if (!html.includes('flip-entry') && depth === 0) {
+    if (!response.ok || /ServiceLogin|accounts\.google\.com/.test(html)) {
+      throw new Error('La carpeta no es pública. Compártela como "cualquier persona con el enlace".');
+    }
+  }
+
+  const entries = parseDriveFolderHtml(html);
+  for (const entry of entries) {
+    if (out.length >= MAX_FOLDER_FILES) break;
+    if (entry.type === 'file' && looksLikeVideo(entry.name)) {
+      out.push({
+        name: prefix + entry.name,
+        url: `https://drive.google.com/file/d/${entry.id}/view`,
+      });
+    }
+  }
+  if (depth < 2) {
+    for (const entry of entries) {
+      if (out.length >= MAX_FOLDER_FILES) break;
+      if (entry.type === 'folder') await listDriveFolder(entry.id, `${prefix}${entry.name}/`, depth + 1, out);
+    }
+  }
+  return out;
+}
+
 // Descarga el video del enlace al servidor (con progreso) y lo registra como
 // un archivo guardado más: luego sirve para la vista previa y el mosaico.
 function enqueueImportJob(url) {
@@ -643,10 +719,27 @@ app.get('/api/jobs/:id', (req, res) => {
   res.json(job);
 });
 
+app.post('/api/folder', async (req, res) => {
+  const folderId = driveFolderId(req.body && req.body.url);
+  if (!folderId) {
+    return res.status(400).json({ error: 'No es un enlace de carpeta de Google Drive.' });
+  }
+  try {
+    const files = await listDriveFolder(folderId);
+    files.sort((a, b) => a.name.localeCompare(b.name, 'es', { numeric: true }));
+    if (files.length === 0) {
+      return res.status(404).json({ error: 'La carpeta no tiene videos (o no es pública).' });
+    }
+    res.json({ files });
+  } catch (err) {
+    res.status(502).json({ error: err.message || 'No se pudo leer la carpeta.' });
+  }
+});
+
 app.post('/api/import', (req, res) => {
-  if (/drive\.google\.com\/drive\/(u\/\d+\/)?folders\//.test(String(req.body && req.body.url))) {
+  if (driveFolderId(req.body && req.body.url)) {
     return res.status(400).json({
-      error: 'Es un enlace de carpeta de Google Drive. Abre cada video y copia su enlace por separado.',
+      error: 'Es un enlace de carpeta: pégalo en la barra de enlaces y se cargarán sus videos.',
     });
   }
   const url = normalizeVideoUrl(req.body && req.body.url);
@@ -762,7 +855,7 @@ setInterval(() => {
   }
 }, 15 * 60 * 1000).unref();
 
-module.exports = { app, buildMosaicPlan, normalizeVideoUrl, driveConfirmUrl };
+module.exports = { app, buildMosaicPlan, normalizeVideoUrl, driveConfirmUrl, parseDriveFolderHtml, driveFolderId };
 
 if (require.main === module) {
   const PORT = process.env.PORT || 3000;

@@ -446,8 +446,302 @@ label {
   display: none !important;
 }
 
+/* --- Selector de pantallas y páginas --- */
+
+.view-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 16px;
+}
+
+.screens {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.screens-label {
+  color: var(--muted);
+  margin-right: 4px;
+  white-space: nowrap;
+}
+
+.screens button {
+  min-width: 42px;
+  height: 36px;
+  padding: 0 10px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--text);
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.screens button.active {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #fff;
+}
+
+.pager {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+/* --- Elegir videos de una carpeta --- */
+
+.modal {
+  position: fixed;
+  inset: 0;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: rgba(0, 0, 0, 0.6);
+}
+
+.modal-box {
+  width: 100%;
+  max-width: 520px;
+  max-height: 85vh;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 18px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+}
+
+.modal-box h2 {
+  margin: 0;
+  font-size: 1.05rem;
+}
+
+.modal-hint {
+  margin: 0;
+  color: var(--muted);
+}
+
+.folder-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.folder-list li + li {
+  border-top: 1px solid var(--border);
+}
+
+.folder-list label {
+  display: flex;
+  gap: 10px;
+  padding: 10px 12px;
+  color: var(--text);
+  cursor: pointer;
+  word-break: break-all;
+}
+
+.folder-list input {
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+  accent-color: var(--accent);
+}
+
+.modal-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+}
+
+/* --- Pantalla completa en iPhone (sin Fullscreen API) --- */
+
+.exit-full {
+  position: fixed;
+  top: calc(8px + env(safe-area-inset-top));
+  right: calc(8px + env(safe-area-inset-right));
+  z-index: 30;
+  padding: 8px 12px;
+  border: none;
+  border-radius: 8px;
+  background: rgba(0, 0, 0, 0.7);
+  color: #fff;
+  font: inherit;
+  font-weight: 700;
+}
+
+body.pseudo-full {
+  overflow: hidden;
+}
+
+body.pseudo-full .grid {
+  position: fixed;
+  inset: 0;
+  z-index: 25;
+  width: 100vw;
+  height: 100dvh;
+  border-radius: 0;
+  align-content: center;
+  overflow-y: auto;
+}
+
+/* --- Táctil / pantalla chica: un toque sobre la cámara muestra sus botones --- */
+
+@media (hover: none), (max-width: 700px) {
+  .tile-bar {
+    opacity: 1;
+  }
+
+  .tile-tools {
+    display: none;
+  }
+
+  .tile.show-tools .tile-tools {
+    display: flex;
+  }
+
+  .tile.show-tools .tile-bar {
+    flex-wrap: wrap;
+    background: rgba(0, 0, 0, 0.85);
+  }
+
+  .tile-tools button {
+    padding: 6px 9px;
+    font-size: 0.9rem;
+  }
+}
+
+/* --- Celular --- */
+
 @media (max-width: 700px) {
-  .grid {
+  .topbar {
+    padding: 10px 12px;
+  }
+
+  .hint {
+    display: none;
+  }
+
+  .topbar-actions {
     width: 100%;
+  }
+
+  .topbar-actions .btn {
+    flex: 1;
+    padding: 8px 6px;
+    font-size: 0.85rem;
+  }
+
+  .link-bar {
+    flex-direction: column;
+    padding: 10px 12px 0;
+  }
+
+  main {
+    padding: 10px 12px 24px;
+    gap: 10px;
+  }
+
+  .grid {
+    --gap: 2px;
+    width: 100%;
+    border-radius: 6px;
+  }
+
+  .tile-bar {
+    font-size: 0.7rem;
+    padding: 3px 4px;
+  }
+
+  .tile.empty small {
+    display: none;
+  }
+
+  .tile-status {
+    font-size: 0.75rem;
+    padding: 6px;
+  }
+
+  .controls,
+  .merge {
+    padding: 12px;
+  }
+
+  .transport {
+    justify-content: center;
+  }
+
+  .time {
+    width: 100%;
+    text-align: center;
+    margin: 0;
+  }
+
+  .btn.icon {
+    width: 48px;
+    height: 44px;
+  }
+
+  .btn.icon.play {
+    width: 64px;
+  }
+
+  .options,
+  .merge-form {
+    gap: 10px;
+  }
+
+  .options label,
+  .merge-form label {
+    flex: 1 1 100%;
+    min-width: 0;
+    justify-content: space-between;
+  }
+
+  .options label.check {
+    flex: 1 1 100%;
+    justify-content: flex-start;
+  }
+
+  .options .btn,
+  .merge-form .btn {
+    flex: 1;
+  }
+
+  .merge-form select,
+  .options select {
+    min-width: 0;
+    max-width: 62%;
+    text-overflow: ellipsis;
+  }
+
+  html,
+  body {
+    overflow-x: hidden;
+  }
+
+  #timeline {
+    height: 28px;
+  }
+}
+
+/* Celular horizontal: aprovechar todo el ancho. */
+@media (max-height: 500px) and (orientation: landscape) {
+  .grid {
+    width: min(100%, calc((100vh - 16px) * 16 / 9 * var(--cols) / var(--rows)));
   }
 }
