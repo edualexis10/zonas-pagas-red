@@ -2,6 +2,8 @@ const path = require('path');
 const fs = require('fs');
 const os = require('os');
 const crypto = require('crypto');
+const { Readable } = require('stream');
+const { pipeline } = require('stream/promises');
 const express = require('express');
 const multer = require('multer');
 const ffmpeg = require('fluent-ffmpeg');
@@ -322,6 +324,104 @@ function buildMosaicPlan({ items, cols, rows, width, fps, audioIndex }) {
   return { inputs, audioInput, filter: filters.join(';'), outW, outH };
 }
 
+// ---------------------------------------------------------------------------
+// Videos desde enlaces
+// ---------------------------------------------------------------------------
+
+// Convierte enlaces "para compartir" en enlaces de descarga directa.
+function normalizeVideoUrl(raw) {
+  let url;
+  try {
+    url = new URL(String(raw).trim());
+  } catch {
+    return null;
+  }
+  if (!['http:', 'https:'].includes(url.protocol)) return null;
+
+  const host = url.hostname.replace(/^www\./, '');
+  if (host === 'drive.google.com' || host === 'docs.google.com') {
+    const match = url.pathname.match(/\/d\/([^/]+)/);
+    const id = match ? match[1] : url.searchParams.get('id');
+    if (id) {
+      return `https://drive.usercontent.google.com/download?id=${encodeURIComponent(id)}&export=download&confirm=t`;
+    }
+  }
+  if (host === 'dropbox.com' || host.endsWith('.dropbox.com')) {
+    url.searchParams.delete('dl');
+    url.searchParams.set('raw', '1');
+  }
+  return url.toString();
+}
+
+function fileNameFromResponse(response, url) {
+  const disposition = response.headers.get('content-disposition') || '';
+  const match = disposition.match(/filename\*=UTF-8''([^;]+)/i) || disposition.match(/filename="?([^";]+)"?/i);
+  if (match) {
+    try {
+      return path.basename(decodeURIComponent(match[1]));
+    } catch {
+      return path.basename(match[1]);
+    }
+  }
+  const last = path.basename(new URL(url).pathname);
+  return last && last.includes('.') ? decodeURIComponent(last) : 'video-enlace.mp4';
+}
+
+// Descarga el video del enlace al servidor (con progreso) y lo registra como
+// un archivo guardado más: luego sirve para la vista previa y el mosaico.
+function enqueueImportJob(url) {
+  const jobId = createJob(url);
+  const job = jobs.get(jobId);
+  job.fileId = null;
+  job.bytes = 0;
+
+  enqueue(async () => {
+    job.status = 'processing';
+    const fileId = crypto.randomUUID();
+    const tempPath = path.join(UPLOAD_DIR, `${fileId}.part`);
+
+    try {
+      const response = await fetch(url, {
+        redirect: 'follow',
+        headers: { 'User-Agent': 'Mozilla/5.0 (VisorMulticamara)' },
+      });
+      if (!response.ok || !response.body) {
+        throw new Error(`el enlace respondió con error HTTP ${response.status}`);
+      }
+      const type = response.headers.get('content-type') || '';
+      if (type.includes('text/html')) {
+        throw new Error(
+          'el enlace abre una página web y no el video. Usa un enlace directo o comparte el archivo como público ("cualquier persona con el enlace").'
+        );
+      }
+
+      const total = Number(response.headers.get('content-length')) || 0;
+      if (total > MAX_FILE_SIZE) throw new Error('el video supera el tamaño máximo permitido (2 GB)');
+      job.originalName = fileNameFromResponse(response, response.url || url);
+
+      const body = Readable.fromWeb(response.body);
+      body.on('data', (chunk) => {
+        job.bytes += chunk.length;
+        if (job.bytes > MAX_FILE_SIZE) body.destroy(new Error('el video supera el tamaño máximo permitido (2 GB)'));
+        if (total) job.progress = Math.min(99, Math.round((job.bytes / total) * 100));
+      });
+      await pipeline(body, fs.createWriteStream(tempPath));
+      if (job.bytes === 0) throw new Error('el enlace no devolvió ningún dato');
+
+      storedFiles.set(fileId, { path: tempPath, originalName: job.originalName });
+      job.fileId = fileId;
+      job.status = 'done';
+      job.progress = 100;
+    } catch (err) {
+      fs.unlink(tempPath, () => {});
+      job.status = 'error';
+      job.error = `No se pudo descargar: ${err.message}`;
+    }
+  });
+
+  return jobId;
+}
+
 function enqueueMosaicJob(options) {
   const jobId = createJob(`mosaico-${options.items.length}-camaras.mp4`);
 
@@ -477,6 +577,14 @@ app.get('/api/jobs/:id', (req, res) => {
   res.json(job);
 });
 
+app.post('/api/import', (req, res) => {
+  const url = normalizeVideoUrl(req.body && req.body.url);
+  if (!url) {
+    return res.status(400).json({ error: 'Enlace inválido. Debe empezar con http:// o https://' });
+  }
+  res.json({ jobId: enqueueImportJob(url) });
+});
+
 app.post('/api/preview', (req, res) => {
   const fileId = req.body && req.body.fileId;
   if (!getStoredFile(fileId)) {
@@ -580,7 +688,7 @@ setInterval(() => {
   }
 }, 15 * 60 * 1000).unref();
 
-module.exports = { app, buildMosaicPlan };
+module.exports = { app, buildMosaicPlan, normalizeVideoUrl };
 
 if (require.main === module) {
   const PORT = process.env.PORT || 3000;

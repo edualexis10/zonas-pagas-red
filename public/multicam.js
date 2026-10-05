@@ -23,7 +23,7 @@ const fillCheck = $('fill-check');
 const audioSelect = $('audio-select');
 const mergeBtn = $('merge-btn');
 
-let slots = []; // { id, file, name, delay, duration, ready, video, tile, statusEl, url, objectUrl, fileIdPromise, audio }
+let slots = []; // { id, file, sourceUrl, name, delay, duration, ready, video, tile, statusEl, url, objectUrl, fileIdPromise, audio }
 let nextId = 1;
 let clock = 0; // tiempo del visor (s); cada cámara muestra clock - delay
 let playing = false;
@@ -122,12 +122,26 @@ async function uploadStored(file, onProgress) {
 // Sube el original una sola vez y reutiliza el id (vista previa + mosaico).
 function ensureUploaded(slot, onProgress) {
   if (!slot.fileIdPromise) {
-    slot.fileIdPromise = uploadStored(slot.file, onProgress).catch((err) => {
+    const task = slot.sourceUrl ? importUrl(slot, onProgress) : uploadStored(slot.file, onProgress);
+    slot.fileIdPromise = task.catch((err) => {
       slot.fileIdPromise = null;
       throw err;
     });
   }
   return slot.fileIdPromise;
+}
+
+// El servidor descarga el video del enlace (Drive, Dropbox, directo).
+async function importUrl(slot, onProgress) {
+  const { jobId } = await postJson('/api/import', { url: slot.sourceUrl });
+  const job = await waitForJob(jobId, (j) => {
+    if (j.status === 'processing') onProgress(j.progress, j.bytes);
+  });
+  if (job.originalName && job.originalName !== slot.name) {
+    slot.name = job.originalName;
+    if (slot.labelEl) slot.labelEl.lastChild.textContent = slot.name;
+  }
+  return job.fileId;
 }
 
 function waitForJob(jobId, onProgress) {
@@ -158,12 +172,36 @@ function waitForJob(jobId, onProgress) {
 
 function addFiles(fileList) {
   const files = Array.from(fileList).filter((f) => f && f.size !== undefined);
-  const free = MAX_CAMERAS - slots.length;
-  if (files.length > free) {
-    alert(`Solo caben ${MAX_CAMERAS} cámaras. Se agregarán ${Math.max(0, free)} de ${files.length} videos.`);
+  addSources(files.map((file) => ({ file, name: file.name })));
+}
+
+function addUrls(text) {
+  const urls = String(text)
+    .split(/[\s,]+/)
+    .map((u) => u.trim())
+    .filter((u) => /^https?:\/\//i.test(u));
+  addSources(urls.map((url) => ({ sourceUrl: url, name: nameFromUrl(url) })));
+  return urls.length;
+}
+
+function nameFromUrl(url) {
+  try {
+    const u = new URL(url);
+    const last = decodeURIComponent(u.pathname.split('/').filter(Boolean).pop() || '');
+    if (/\.[a-z0-9]{2,5}$/i.test(last)) return last;
+    return `${u.hostname.replace(/^www\./, '')} (enlace)`;
+  } catch {
+    return 'enlace';
   }
-  files.slice(0, Math.max(0, free)).forEach((file) => {
-    const slot = createSlot(file);
+}
+
+function addSources(sources) {
+  const free = MAX_CAMERAS - slots.length;
+  if (sources.length > free) {
+    alert(`Solo caben ${MAX_CAMERAS} cámaras. Se agregarán ${Math.max(0, free)} de ${sources.length} videos.`);
+  }
+  sources.slice(0, Math.max(0, free)).forEach((source) => {
+    const slot = createSlot(source);
     if (pendingTarget !== null && pendingTarget < slots.length) {
       slots.splice(pendingTarget, 0, slot);
       pendingTarget += 1;
@@ -176,7 +214,7 @@ function addFiles(fileList) {
   render();
 }
 
-function createSlot(file) {
+function createSlot({ file = null, sourceUrl = null, name }) {
   const id = nextId++;
   const video = document.createElement('video');
   video.muted = true;
@@ -185,7 +223,8 @@ function createSlot(file) {
   return {
     id,
     file,
-    name: file.name,
+    sourceUrl,
+    name,
     delay: 0,
     duration: 0,
     ready: false,
@@ -208,14 +247,21 @@ function setSlotStatus(slot, text, isError) {
   }
 }
 
+// Enlaces que el navegador no puede reproducir directo (páginas para compartir).
+function isShareLink(url) {
+  return /(^|\.)(drive|docs)\.google\.com$|(^|\.)dropbox\.com$|(^|\.)1drv\.ms$|(^|\.)onedrive\.live\.com$/i.test(
+    new URL(url).hostname
+  );
+}
+
 function loadSlot(slot) {
-  if (SERVER_ONLY_EXT.includes(extOf(slot.name))) {
+  if (SERVER_ONLY_EXT.includes(extOf(slot.name)) || (slot.sourceUrl && isShareLink(slot.sourceUrl))) {
     loadViaServer(slot);
     return;
   }
 
   setSlotStatus(slot, 'Abriendo…');
-  slot.objectUrl = URL.createObjectURL(slot.file);
+  const src = slot.sourceUrl || (slot.objectUrl = URL.createObjectURL(slot.file));
   const video = slot.video;
   let settled = false;
 
@@ -243,14 +289,17 @@ function loadSlot(slot) {
   }
   video.addEventListener('loadeddata', ok);
   video.addEventListener('error', fallback);
-  video.src = slot.objectUrl;
+  video.src = src;
 }
 
 async function loadViaServer(slot) {
   try {
-    setSlotStatus(slot, 'Subiendo para convertir… 0%');
-    const fileId = await ensureUploaded(slot, (pct) => {
-      if (!slot.removed) setSlotStatus(slot, `Subiendo para convertir… ${pct}%`);
+    const verb = slot.sourceUrl ? 'Descargando enlace' : 'Subiendo para convertir';
+    setSlotStatus(slot, `${verb}…`);
+    const fileId = await ensureUploaded(slot, (pct, bytes) => {
+      if (slot.removed) return;
+      const detail = pct ? `${pct}%` : bytes ? `${(bytes / 1048576).toFixed(1)} MB` : '';
+      setSlotStatus(slot, `${verb}… ${detail}`);
     });
     if (slot.removed) return;
     setSlotStatus(slot, 'Convirtiendo para reproducir…');
@@ -398,7 +447,7 @@ function buildTile(slot, index) {
   const bar = document.createElement('div');
   bar.className = 'tile-bar';
   bar.innerHTML = `
-    <span class="cam-label" title="${escapeHtml(slot.name)}">CAM ${index + 1} · ${escapeHtml(slot.name)}</span>
+    <span class="cam-label" title="${escapeHtml(slot.sourceUrl || slot.name)}">CAM ${index + 1} · <span>${escapeHtml(slot.name)}</span></span>
     <span class="tile-tools">
       <label title="Retraso en segundos: positivo = esta cámara empieza después; negativo = se recorta su inicio">
         ⏱<input type="number" step="0.1" value="${slot.delay}" class="delay-input" />s
@@ -411,6 +460,7 @@ function buildTile(slot, index) {
     </span>
   `;
   tile.appendChild(bar);
+  slot.labelEl = bar.querySelector('.cam-label');
 
   const delayInput = bar.querySelector('.delay-input');
   delayInput.addEventListener('change', () => {
@@ -544,6 +594,13 @@ function snapshot() {
     ctx.drawImage(slot.video, x + (cellW - w) / 2, y + (cellH - h) / 2, w, h);
   });
 
+  try {
+    canvas.toDataURL();
+  } catch {
+    alert('No se puede capturar: alguna cámara viene de un enlace de otro sitio que no lo permite.');
+    return;
+  }
+
   canvas.toBlob((blob) => {
     const url = URL.createObjectURL(blob);
     triggerDownload(url, `captura-${formatTime(clock).replace(/:/g, '-')}.png`);
@@ -577,7 +634,7 @@ async function merge() {
     const progress = current.map(() => 0);
     const report = () => {
       const avg = Math.round(progress.reduce((a, b) => a + b, 0) / current.length);
-      setMergeStatus(`Subiendo videos… ${avg}%`, avg * 0.5);
+      setMergeStatus(`Subiendo / descargando videos… ${avg}%`, avg * 0.5);
     };
     report();
     const fileIds = await Promise.all(
@@ -630,6 +687,22 @@ async function merge() {
 // ---------------------------------------------------------------------------
 // Eventos
 // ---------------------------------------------------------------------------
+
+const linkInput = $('link-input');
+$('link-form').addEventListener('submit', (e) => {
+  e.preventDefault();
+  if (addUrls(linkInput.value) === 0) {
+    alert('Pega al menos un enlace que empiece con http:// o https://');
+    return;
+  }
+  linkInput.value = '';
+});
+linkInput.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    $('link-form').requestSubmit();
+  }
+});
 
 fileInput.addEventListener('change', () => {
   addFiles(fileInput.files);
