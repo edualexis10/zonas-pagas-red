@@ -634,6 +634,26 @@ const chunkUpload = multer({
 });
 
 const app = express();
+
+// Para el hosting: comprobación de salud (sin contraseña).
+app.get('/healthz', (req, res) => res.send('ok'));
+
+// Contraseña opcional: si se define APP_PASSWORD (p. ej. en Render), el
+// navegador la pide una vez y la recuerda. Sin la variable, la app es abierta.
+const APP_PASSWORD = process.env.APP_PASSWORD || '';
+if (APP_PASSWORD) {
+  app.use((req, res, next) => {
+    const header = req.headers.authorization || '';
+    const [scheme, encoded] = header.split(' ');
+    const given = scheme === 'Basic' && encoded ? Buffer.from(encoded, 'base64').toString().split(':').slice(1).join(':') : '';
+    const a = Buffer.from(given);
+    const b = Buffer.from(APP_PASSWORD);
+    if (a.length === b.length && crypto.timingSafeEqual(a, b)) return next();
+    res.set('WWW-Authenticate', 'Basic realm="Visor Multicamara", charset="UTF-8"');
+    res.status(401).send('Se necesita la contraseña (cualquier usuario).');
+  });
+}
+
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 

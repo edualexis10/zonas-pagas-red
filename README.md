@@ -2,6 +2,17 @@
 
 Aplicación web para ver hasta **8 cámaras sincronizadas** a la vez (como un DVR), **unirlas en un solo video mosaico** para descargarlo, y convertir varios videos de distintos tamaños, en paralelo, entre distintos formatos (MP4, AVI, MOV, MKV, WEBM, GIF).
 
+## Publicar en internet (Render)
+
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/edualexis10/zonas-pagas-red)
+
+1. Pulsa el botón de arriba e inicia sesión en Render con tu cuenta de GitHub.
+2. Pulsa **Deploy Blueprint** (usa `render.yaml`). Al terminar, la app queda en un enlace fijo `https://visor-multicamara….onrender.com`.
+3. Cada vez que se suben cambios a `main`, Render la actualiza solo.
+4. (Opcional) Para que no cualquiera la use: en Render → **Environment** agrega `APP_PASSWORD` con una contraseña. El navegador la pide una vez (usuario: cualquiera).
+
+El plan gratis "duerme" tras 15 minutos sin uso (la primera visita tarda ~1 minuto en despertar) y tiene poca CPU, así que unir muchos videos largos es lento; el plan *Starter* es más rápido.
+
 ## Uso
 
 ```bash
