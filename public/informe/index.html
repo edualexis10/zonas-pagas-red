@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Informes de Incidentes</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700&family=Public+Sans:wght@400;500;600&family=Carlito:ital,wght@0,400;0,700;1,400&display=swap" />
+  <link rel="stylesheet" href="informe.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">
+      <span class="brand-mark">COF</span>
+      <div>
+        <h1>Informes de incidentes</h1>
+        <p>Rellena los datos, pega las capturas GPS y descarga el Word con el formato del informe.</p>
+      </div>
+    </div>
+    <nav class="top-actions">
+      <button type="button" class="btn ghost" id="btn-ejemplo">Cargar ejemplo</button>
+      <button type="button" class="btn ghost" id="btn-nuevo">Nuevo informe</button>
+      <a class="btn ghost" href="/">Visor multicámara</a>
+    </nav>
+  </header>
+
+  <main class="layout">
+    <section class="form-col" aria-label="Datos del informe">
+
+      <fieldset class="block">
+        <legend><span class="step">1</span> Bus y responsable</legend>
+        <div class="grid g4">
+          <label>PPU<input id="f-ppu" data-k="ppu" placeholder="HPFJ-98" autocomplete="off" /></label>
+          <label class="span2">Responsable (conductor/a)<input id="f-responsable" data-k="responsable" placeholder="APELLIDOS NOMBRES" autocomplete="off" /></label>
+          <label>RUT<input id="f-rut" data-k="rut" placeholder="12345678-5" autocomplete="off" /></label>
+          <label>Terminal<input id="f-terminal" data-k="terminal" placeholder="Santa Clara" list="terminales" autocomplete="off" /></label>
+          <label>Fecha del incidente<input id="f-fecha" data-k="fecha" type="date" /></label>
+          <label>Conductor/a
+            <select id="f-genero" data-k="genero">
+              <option value="f">La conductora</option>
+              <option value="m">El conductor</option>
+            </select>
+          </label>
+          <label>Motivo
+            <select id="f-motivo" data-k="motivo">
+              <option value="incidente">Incidente</option>
+              <option value="desvinculacion">Desvinculación</option>
+              <option value="caso_grave">Caso grave</option>
+              <option value="reclamo">Reclamo</option>
+            </select>
+          </label>
+        </div>
+        <div class="grid g4">
+          <label>Servicio<input id="f-servicio" data-k="servicio" placeholder="B14" autocomplete="off" /></label>
+          <label>Sentido
+            <select id="f-sentido" data-k="sentido">
+              <option value="">—</option>
+              <option>Ida</option>
+              <option>Regreso</option>
+            </select>
+          </label>
+          <label class="span2">Con dirección a<input id="f-destino" data-k="destino" placeholder="Mapocho" autocomplete="off" /></label>
+        </div>
+        <datalist id="terminales"></datalist>
+      </fieldset>
+
+      <fieldset class="block">
+        <legend><span class="step">2</span> Línea de tiempo</legend>
+        <div class="paste-zone" id="paste-zone" tabindex="0">
+          <strong>Pega aquí una captura GPS (Ctrl+V)</strong> o arrástrala. Se crea el movimiento y se leen solos la hora, el servicio, el sentido y la velocidad.
+          <label class="btn small">Elegir imágenes<input type="file" id="paste-file" accept="image/*" multiple hidden /></label>
+        </div>
+        <ol class="events" id="events"></ol>
+        <div class="add-row">
+          <span>Agregar:</span>
+          <button type="button" class="chip" data-add="inicio">Inicio de expedición</button>
+          <button type="button" class="chip" data-add="recorrido">Recorrido</button>
+          <button type="button" class="chip accent" data-add="incidente">Incidente</button>
+          <button type="button" class="chip" data-add="detencion">Detención</button>
+          <button type="button" class="chip" data-add="desvio">Desvío</button>
+          <button type="button" class="chip" data-add="retoma">Retoma</button>
+          <button type="button" class="chip" data-add="fin">Fin de expedición</button>
+          <button type="button" class="chip" data-add="otro">Texto libre</button>
+        </div>
+      </fieldset>
+
+      <fieldset class="block">
+        <legend><span class="step">3</span> Grabaciones y cierre</legend>
+        <div class="grid g2">
+          <label>Grabaciones
+            <select id="f-grabaciones" data-k="grabaciones">
+              <option value="sin_sistema">Bus no presenta sistema de grabaciones</option>
+              <option value="adjunta">Se adjuntan imágenes de las grabaciones</option>
+              <option value="no_disponible">Grabaciones no disponibles para el horario</option>
+              <option value="en_revision">Grabaciones en descarga y revisión</option>
+              <option value="omitir">No mencionar</option>
+            </select>
+          </label>
+          <div class="field-images" id="grab-images-wrap" hidden>
+            <span class="label-like">Imágenes de grabación</span>
+            <div class="thumbs" id="grab-images"></div>
+            <label class="btn small">Agregar imagen<input type="file" id="grab-file" accept="image/*" multiple hidden /></label>
+          </div>
+        </div>
+        <label>Observaciones o conclusión (opcional)
+          <textarea id="f-cierre" data-k="cierre" rows="3" placeholder="ej: se solicita evaluar la continuidad laboral de la conductora por reiteración de incidentes"></textarea>
+        </label>
+        <details class="more">
+          <summary>Texto de introducción</summary>
+          <textarea id="f-intro" data-k="intro" rows="3"></textarea>
+        </details>
+      </fieldset>
+
+      <fieldset class="block">
+        <legend><span class="step">4</span> Firma</legend>
+        <p class="hint">Se guarda solo en este navegador. Si subes la imagen de tu firma (con timbre y nombre) se usa tal cual; si no, se imprimen estas líneas.</p>
+        <div class="grid g2">
+          <div class="firma-box">
+            <img id="firma-img" alt="Firma" hidden />
+            <div class="firma-actions">
+              <label class="btn small">Subir firma<input type="file" id="firma-file" accept="image/*" hidden /></label>
+              <button type="button" class="btn small ghost" id="firma-quitar" hidden>Quitar</button>
+            </div>
+          </div>
+          <label>Líneas de firma (una por línea)
+            <textarea id="f-firma" data-k="firmaTexto" rows="4"></textarea>
+          </label>
+        </div>
+      </fieldset>
+    </section>
+
+    <aside class="preview-col" aria-label="Revisión y vista previa">
+      <div class="review" id="review">
+        <div class="review-head">
+          <span class="status-pill" id="status-pill">Revisando…</span>
+          <button type="button" class="btn primary" id="btn-docx">Descargar Word</button>
+        </div>
+        <ul class="issues" id="issues"></ul>
+        <p class="save-note" id="save-note"></p>
+      </div>
+
+      <div class="paper-wrap">
+        <article class="paper" id="paper" aria-label="Vista previa del informe"></article>
+      </div>
+    </aside>
+  </main>
+
+  <template id="tpl-event">
+    <li class="event">
+      <div class="ev-head">
+        <span class="ev-num"></span>
+        <select class="ev-tipo" aria-label="Tipo de movimiento">
+          <option value="inicio">Inicio de expedición</option>
+          <option value="recorrido">Recorrido</option>
+          <option value="incidente">Incidente</option>
+          <option value="detencion">Detención</option>
+          <option value="desvio">Desvío</option>
+          <option value="retoma">Retoma recorrido</option>
+          <option value="fin">Fin de expedición</option>
+          <option value="otro">Texto libre</option>
+        </select>
+        <input class="ev-hora" type="time" aria-label="Hora" />
+        <div class="ev-tools">
+          <button type="button" class="icon" data-act="up" title="Subir">↑</button>
+          <button type="button" class="icon" data-act="down" title="Bajar">↓</button>
+          <button type="button" class="icon danger" data-act="del" title="Eliminar">✕</button>
+        </div>
+      </div>
+      <div class="ev-body">
+        <div class="grid g3 ev-fields">
+          <label data-show="recorrido incidente detencion desvio retoma">Lugar / calle<input data-f="lugar" placeholder="Avenida Einstein" /></label>
+          <label data-show="recorrido incidente">Velocidad (km/h)<input data-f="velocidad" inputmode="numeric" placeholder="0" /></label>
+          <label data-show="detencion">Minutos detenido<input data-f="minutos" inputmode="numeric" /></label>
+          <label data-show="incidente">Qué ocurrió
+            <select data-f="accion">
+              <option value="solera">Colisiona con la solera</option>
+              <option value="vehiculo">Colisiona con vehículo particular</option>
+              <option value="bus">Colisiona con otro bus</option>
+              <option value="objeto">Colisiona con objeto fijo / poste</option>
+              <option value="atropello">Atropello a peatón</option>
+              <option value="caida">Caída de pasajero</option>
+              <option value="agresion">Agresión de usuario</option>
+              <option value="frenado">Frenado brusco</option>
+              <option value="falla">Falla mecánica</option>
+              <option value="otra">Otra (describir)</option>
+            </select>
+          </label>
+          <label data-show="incidente" class="span2">Complemento<input data-f="complemento" placeholder="del paradero ubicado en dicha avenida" /></label>
+          <label data-show="incidente">Consecuencia
+            <select data-f="consecuencia">
+              <option value="danos_bus">Daños materiales en el bus</option>
+              <option value="danos_terceros">Daños a terceros</option>
+              <option value="danos_ambos">Daños en bus y a terceros</option>
+              <option value="lesion_pasajero">Lesiones a pasajero</option>
+              <option value="lesion_tercero">Lesiones a terceros</option>
+              <option value="sin_danos">Sin daños ni lesionados</option>
+              <option value="ninguna">No indicar</option>
+            </select>
+          </label>
+          <label data-show="incidente detencion desvio otro" class="span3">Detalle adicional<input data-f="detalle" placeholder="Escribe con tus palabras; se corrige la redacción" /></label>
+        </div>
+        <div class="ev-media">
+          <div class="thumbs"></div>
+          <label class="btn small">Imagen GPS<input type="file" accept="image/*" multiple hidden /></label>
+          <span class="ocr-chip" hidden></span>
+        </div>
+        <div class="ev-text">
+          <div class="ev-text-head">
+            <span>Redacción</span>
+            <button type="button" class="link" data-act="regen" hidden>Volver a redactar automáticamente</button>
+          </div>
+          <textarea class="ev-texto" rows="3" aria-label="Texto del movimiento"></textarea>
+        </div>
+      </div>
+    </li>
+  </template>
+
+  <script src="informe-app.js"></script>
+</body>
+</html>

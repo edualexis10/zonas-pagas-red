@@ -20,9 +20,16 @@ Abre `http://localhost:3000`:
   - **Retraso por cámara** (⏱): si las grabaciones no empiezan a la misma hora, ajusta los segundos para alinearlas. 🔇/🔊 elige qué cámara se escucha.
   - **Unir y descargar**: genera un MP4 con todas las cámaras en cuadrícula (misma distribución, retrasos y audio elegido que el visor), en HD, Full HD, 2K o 4K, y lo descarga automáticamente.
     - **Audio del video**: los audios nunca se mezclan. Elige *Sin audio*, *Solo cámara N*, o *Todas, en pistas separadas*: cada cámara queda como una pista de audio con su nombre ("Cámara 1", "Cámara 2"…) y eliges cuál escuchar en el reproductor (en VLC: Audio → Pista de audio).
+- **Informes de incidentes** (`/informe/`): arma el informe de movimientos del bus (desvinculaciones, casos graves, incidentes) y lo descarga en Word con el formato de siempre (logo + "INFORME PPU", tabla PPU/Responsable/RUT/Terminal, viñetas con hora e imagen GPS, firma).
+  - **Pega las capturas GPS** (Ctrl+V, arrastrar o elegir): cada una crea un movimiento y el servidor lee la imagen (OCR) para completar hora, fecha, servicio, sentido, destino y velocidad. Sugiere el tipo en orden: inicio → incidente → fin.
+  - **Redacción automática**: según el tipo de movimiento (inicio, recorrido, incidente, detención, desvío, retoma, fin o texto libre) escribe el párrafo con conectores ("Con fecha…", "A las…", "Posteriormente…"). El texto se puede editar; lo que escribas a mano se corrige (tildes comunes, "hrs" → "horas", PPU con guion, punto final).
+  - **Revisión**: avisa datos faltantes, RUT con dígito verificador inválido, PPU mal escrita, horas fuera de orden, movimientos sin imagen y diferencias entre la hora escrita y la de la captura.
+  - El borrador, la firma (imagen) y los terminales usados se guardan solo en el navegador.
 - **Conversor** (`/convertir.html`): sube uno o varios videos, elige el formato de salida (MP4 por defecto) y descarga cada resultado cuando esté listo.
 
 ## Cómo funciona
+
+- **Informes** (`informe.js`): `POST /api/informe/ocr` lee la captura con `tesseract.js` (español; los datos del idioma se descargan la primera vez y quedan en `.cache/`) y `POST /api/informe/docx` arma el Word con la librería `docx` (carta, Calibri, mismos márgenes que el formato original).
 
 - Backend en Express (`server.js`) recibe los videos subidos con `multer` (hasta 20 por solicitud, 2 GB cada uno) y los procesa con `fluent-ffmpeg` (usando el binario incluido por `ffmpeg-static`, sin dependencias del sistema).
 - **Cola de conversión concurrente**: las conversiones se procesan en paralelo, acotadas al número de núcleos de CPU disponibles, para aprovechar el hardware sin saturarlo cuando llegan muchos videos a la vez.

@@ -9,6 +9,7 @@ const express = require('express');
 const multer = require('multer');
 const ffmpeg = require('fluent-ffmpeg');
 const ffmpegPath = require('ffmpeg-static');
+const informe = require('./informe');
 
 ffmpeg.setFfmpegPath(ffmpegPath);
 
@@ -634,6 +635,8 @@ const chunkUpload = multer({
 });
 
 const app = express();
+// Va antes del parser JSON global: los informes traen imágenes y pesan más de 100 KB.
+app.use('/api/informe', informe.router);
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
