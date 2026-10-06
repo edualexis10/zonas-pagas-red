@@ -24,7 +24,22 @@ const MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024; // 2 GB por video
 
 // Varias conversiones a la vez, pero acotadas a los núcleos disponibles
 // para no saturar el servidor cuando llegan muchos videos juntos.
-const CONCURRENCY = Math.max(1, os.cpus().length - 1);
+// En contenedores (Railway, Render) os.cpus() muestra los núcleos de la
+// máquina física, no los asignados: se lee el límite real del cgroup para no
+// lanzar decenas de ffmpeg que se estorban entre sí y terminan más lentos.
+function effectiveCpus() {
+  try {
+    const [quota, period] = fs.readFileSync('/sys/fs/cgroup/cpu.max', 'utf8').trim().split(/\s+/);
+    if (quota !== 'max') return Math.max(1, Math.floor(Number(quota) / Number(period)));
+  } catch {
+    // sin cgroup v2: se usa lo que informa el sistema
+  }
+  return os.availableParallelism ? os.availableParallelism() : os.cpus().length;
+}
+const CPUS = effectiveCpus();
+// Cada ffmpeg ya usa varios hilos: con pocos trabajos a la vez cada uno
+// termina antes. MAX_JOBS permite ajustarlo desde las variables del hosting.
+const CONCURRENCY = Math.max(1, Number(process.env.MAX_JOBS) || Math.min(3, Math.ceil(CPUS / 2)));
 let active = 0;
 const queue = [];
 
@@ -268,16 +283,19 @@ function enqueuePreviewJob(fileId, format) {
 // medio habitual y 29 ya se nota un poco, pero pesa muchísimo menos.
 // ---------------------------------------------------------------------------
 
+// Se usa el preset "veryfast": ~3-4 veces más rápido que "medium" y, bajando
+// un punto el CRF, la calidad queda igual a cambio de algo más de peso.
 const COMPRESSION_LEVELS = {
-  alta: { crf: 22, maxHeight: 0, audioBitrate: '128k' },
-  equilibrada: { crf: 26, maxHeight: 1080, audioBitrate: '96k' },
-  maxima: { crf: 29, maxHeight: 720, audioBitrate: '64k' },
+  alta: { crf: 21, maxHeight: 0, audioBitrate: '128k', preset: 'veryfast' },
+  equilibrada: { crf: 25, maxHeight: 1080, audioBitrate: '96k', preset: 'veryfast' },
+  maxima: { crf: 28, maxHeight: 720, audioBitrate: '64k', preset: 'superfast' },
 };
 
-// Calidad del mosaico unido (CRF de H.264).
-const MOSAIC_QUALITY_CRF = { alta: 20, normal: 23, comprimida: 27 };
+// Calidad del mosaico unido (CRF de H.264). Acepta también los niveles de
+// compresión para "comprimir y unir" en un solo paso.
+const MOSAIC_QUALITY_CRF = { alta: 20, normal: 23, comprimida: 27, equilibrada: 25, maxima: 28 };
 
-function enqueueCompressJob(fileId, level) {
+function enqueueCompressJob(fileId, level, expectedDuration) {
   const stored = getStoredFile(fileId);
   const settings = COMPRESSION_LEVELS[level];
   const jobId = createJob(stored.originalName);
@@ -300,8 +318,7 @@ function enqueueCompressJob(fileId, level) {
         '-map', '0:a?',
         '-vf', filters.join(','),
         '-c:v', 'libx264',
-        // "medium" comprime mejor que "veryfast" con la misma calidad.
-        '-preset', 'medium',
+        '-preset', settings.preset,
         '-crf', String(settings.crf),
         '-c:a', 'aac',
         '-b:a', settings.audioBitrate,
@@ -311,9 +328,16 @@ function enqueueCompressJob(fileId, level) {
       .toFormat('mp4');
 
     try {
-      await runCommand(command, outputPath, (p) => {
-        job.progress = p;
-      });
+      // Los AVI de DVR a menudo no traen la duración en la cabecera: el
+      // navegador la envía para poder mostrar el porcentaje.
+      await runCommand(
+        command,
+        outputPath,
+        (p) => {
+          job.progress = p;
+        },
+        expectedDuration
+      );
       finishJob(job, outputName);
       job.outputBytes = fs.statSync(outputPath).size;
     } catch (err) {
@@ -677,6 +701,8 @@ function enqueueMosaicJob(options) {
       );
       finishJob(job, outputName);
       job.audioTracks = plan.audioInputs.map((input) => input.camera + 1);
+      job.inputBytes = options.items.reduce((sum, item) => sum + fs.statSync(item.path).size, 0);
+      job.outputBytes = fs.statSync(path.join(OUTPUT_DIR, outputName)).size;
     } catch (err) {
       job.status = 'error';
       job.error = `No se pudo unir los videos: ${err.message}`;
@@ -844,7 +870,8 @@ app.post('/api/compress', (req, res) => {
   if (!COMPRESSION_LEVELS[level]) {
     return res.status(400).json({ error: 'Nivel de compresión inválido.' });
   }
-  res.json({ jobId: enqueueCompressJob(fileId, level) });
+  const expectedDuration = Math.max(0, Number(req.body.expectedDuration) || 0);
+  res.json({ jobId: enqueueCompressJob(fileId, level, expectedDuration) });
 });
 
 app.post('/api/preview', (req, res) => {
@@ -960,6 +987,6 @@ if (require.main === module) {
   const PORT = process.env.PORT || 3000;
   app.listen(PORT, () => {
     console.log(`Servidor de video escuchando en http://localhost:${PORT}`);
-    console.log(`Conversiones simultáneas permitidas: ${CONCURRENCY}`);
+    console.log(`Núcleos disponibles: ${CPUS} · trabajos de video simultáneos: ${CONCURRENCY}`);
   });
 }

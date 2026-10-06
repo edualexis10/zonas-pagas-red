@@ -758,7 +758,9 @@ function formatBytes(bytes) {
 
 function updateCompressOptions() {
   const previous = compressTarget.value;
-  compressTarget.innerHTML = '<option value="all">Todas las cámaras</option>';
+  compressTarget.innerHTML =
+    '<option value="merge">Todas unidas en un solo video (mosaico)</option>' +
+    '<option value="all">Todas, cada una por separado</option>';
   slots.forEach((s, i) => {
     const opt = document.createElement('option');
     opt.value = String(s.id);
@@ -767,7 +769,34 @@ function updateCompressOptions() {
   });
   if ([...compressTarget.options].some((o) => o.value === previous)) compressTarget.value = previous;
   compressBtn.disabled = slots.length === 0 || compressBtn.dataset.busy === '1';
-  $('compress-hint').textContent = COMPRESS_HINTS[$('compress-level').value];
+  const hint = COMPRESS_HINTS[$('compress-level').value];
+  $('compress-hint').textContent =
+    compressTarget.value === 'merge'
+      ? `${hint} Se unen todas las cámaras en un solo archivo (misma distribución, retrasos y audio de "Unir en un solo video"), comprimido en un solo paso.`
+      : hint;
+}
+
+// Ancho total del mosaico según el nivel: más compresión, menos resolución.
+const MERGE_WIDTH_BY_LEVEL = { alta: 1920, equilibrada: 1920, maxima: 1280 };
+
+function compressMerged(level) {
+  const row = addCompressRow(`Mosaico unido · ${slots.length} cámaras`);
+  return merge({
+    quality: level,
+    width: Math.min(Number($('width-select').value), MERGE_WIDTH_BY_LEVEL[level]),
+    report: (text, pct, type) => row.set(text, pct, type),
+    onDone: (job, audioNote) => {
+      const saved = job.inputBytes ? Math.min(99, Math.round((1 - job.outputBytes / job.inputBytes) * 100)) : 0;
+      const sizes = `${formatBytes(job.inputBytes)} → ${formatBytes(job.outputBytes)}${saved > 0 ? ` (−${saved}%)` : ''}`;
+      row.set(`✅ ${sizes} · ${audioNote}`, 100, 'success');
+      const link = document.createElement('a');
+      link.className = 'btn success';
+      link.href = job.downloadUrl;
+      link.setAttribute('download', job.fileName);
+      link.textContent = '⬇ Descargar video unido';
+      row.li.appendChild(link);
+    },
+  });
 }
 
 function addCompressRow(name) {
@@ -798,7 +827,7 @@ function addCompressRow(name) {
 async function compressSlot(slot, level, row, autoDownload) {
   try {
     const fileId = await ensureUploaded(slot, (pct) => row.set(`Subiendo… ${pct || 0}%`, (pct || 0) * 0.3));
-    const { jobId } = await postJson('/api/compress', { fileId, level });
+    const { jobId } = await postJson('/api/compress', { fileId, level, expectedDuration: slot.duration || 0 });
     const job = await waitForJob(jobId, (j) => {
       if (j.status === 'queued') row.set('En cola…', 30);
       else row.set(`Comprimiendo… ${j.progress}%`, 30 + j.progress * 0.7);
@@ -824,12 +853,18 @@ async function compressSlot(slot, level, row, autoDownload) {
 async function compress() {
   const level = $('compress-level').value;
   const target = compressTarget.value;
-  const chosen = target === 'all' ? slots.slice() : slots.filter((s) => String(s.id) === target);
+  const chosen = target === 'all' || target === 'merge' ? slots.slice() : slots.filter((s) => String(s.id) === target);
   if (chosen.length === 0) return;
 
   compressBtn.dataset.busy = '1';
   updateCompressOptions();
   $('compress-list').innerHTML = '';
+  if (target === 'merge') {
+    await compressMerged(level);
+    delete compressBtn.dataset.busy;
+    updateCompressOptions();
+    return;
+  }
   // El servidor las procesa en paralelo según sus núcleos disponibles.
   await Promise.all(
     chosen.map((slot) =>
@@ -840,7 +875,7 @@ async function compress() {
   updateCompressOptions();
 }
 
-function setMergeStatus(text, pct, type) {
+function setMergeStatusDefault(text, pct, type) {
   $('merge-status').hidden = false;
   const textEl = $('merge-status-text');
   textEl.textContent = text;
@@ -849,11 +884,14 @@ function setMergeStatus(text, pct, type) {
   $('merge-progress').classList.toggle('error', type === 'error');
 }
 
-async function merge() {
+// opts (para "comprimir y unir"): quality, width, report(texto, %, tipo) y
+// onDone(job). Sin opts usa lo elegido en la sección "Unir en un solo video".
+async function merge(opts = {}) {
   if (slots.length === 0) return;
+  const setMergeStatus = opts.report || setMergeStatusDefault;
   const current = slots.slice();
   const download = $('merge-download');
-  download.hidden = true;
+  if (!opts.report) download.hidden = true;
   mergeBtn.dataset.busy = '1';
   updateMergeState();
 
@@ -862,7 +900,7 @@ async function merge() {
     const progress = current.map(() => 0);
     const report = () => {
       const avg = Math.round(progress.reduce((a, b) => a + b, 0) / current.length);
-      setMergeStatus(`Subiendo / descargando videos… ${avg}%`, avg * 0.5);
+      setMergeStatus(`Subiendo / descargando videos… ${avg}%`, avg * 0.3);
     };
     report();
     const fileIds = await Promise.all(
@@ -887,17 +925,17 @@ async function merge() {
       items: current.map((slot, i) => ({ fileId: fileIds[i], delay: slot.delay })),
       cols,
       rows,
-      width: Number($('width-select').value),
+      width: opts.width || Number($('width-select').value),
       fps: Number($('fps-select').value),
-      quality: $('quality-select').value,
+      quality: opts.quality || $('quality-select').value,
       audioIndex: Number(audioSelect.value),
       expectedDuration,
     });
 
-    setMergeStatus('Uniendo videos…', 50);
+    setMergeStatus('Uniendo videos…', 30);
     const job = await waitForJob(jobId, (j) => {
-      if (j.status === 'queued') setMergeStatus('En cola…', 50);
-      else setMergeStatus(`Uniendo videos… ${j.progress}%`, 50 + j.progress / 2);
+      if (j.status === 'queued') setMergeStatus('En cola…', 30);
+      else setMergeStatus(`Uniendo videos… ${j.progress}%`, 30 + j.progress * 0.7);
     });
 
     const tracks = job.audioTracks || [];
@@ -909,10 +947,14 @@ async function merge() {
           : tracks.length === 1
             ? `audio de la cámara ${tracks[0]}`
             : `audio en pistas separadas: cámaras ${tracks.join(', ')}`;
-    setMergeStatus(`¡Listo! ${job.fileName} — ${audioNote}`, 100, 'success');
-    download.href = job.downloadUrl;
-    download.setAttribute('download', job.fileName);
-    download.hidden = false;
+    if (opts.onDone) {
+      opts.onDone(job, audioNote);
+    } else {
+      setMergeStatus(`¡Listo! ${job.fileName} — ${audioNote}`, 100, 'success');
+      download.href = job.downloadUrl;
+      download.setAttribute('download', job.fileName);
+      download.hidden = false;
+    }
     triggerDownload(job.downloadUrl, job.fileName);
   } catch (err) {
     setMergeStatus(err.message || 'Error al unir los videos.', 100, 'error');
@@ -1019,9 +1061,10 @@ $('fullscreen-btn').addEventListener('click', () => {
   }
 });
 $('exit-full').addEventListener('click', () => setPseudoFullscreen(false));
-mergeBtn.addEventListener('click', merge);
+mergeBtn.addEventListener('click', () => merge());
 compressBtn.addEventListener('click', compress);
 $('compress-level').addEventListener('change', updateCompressOptions);
+compressTarget.addEventListener('change', updateCompressOptions);
 
 document.addEventListener('keydown', (e) => {
   if (e.target.matches('input, select, textarea')) return;
