@@ -40,6 +40,7 @@ Abre `http://localhost:3000`:
   - **Redacción automática**: según el tipo de movimiento (inicio, recorrido, incidente, detención, desvío, retoma, fin o texto libre) escribe el párrafo con conectores ("Con fecha…", "A las…", "Posteriormente…"). El texto se puede editar; lo que escribas a mano se corrige (tildes comunes, "hrs" → "horas", PPU con guion, punto final).
   - **Revisión**: avisa datos faltantes, RUT con dígito verificador inválido, PPU mal escrita, horas fuera de orden, movimientos sin imagen y diferencias entre la hora escrita y la de la captura.
   - El borrador, la firma (imagen) y los terminales usados se guardan solo en el navegador.
+- **🗜 Comprimir videos**: elige una cámara o todas y un nivel — *Alta calidad* (CRF 22, mismo tamaño de imagen), *Equilibrado* (CRF 26, máx. 1080p, recomendado) o *Máxima compresión* (CRF 29, máx. 720p). Muestra cuánto pesaba y cuánto pesa ahora; el original no se modifica. El mosaico unido también tiene un selector de *Calidad* (alta / normal / comprimida).
 - **Conversor** (`/convertir.html`): sube uno o varios videos, elige el formato de salida (MP4 por defecto) y descarga cada resultado cuando esté listo.
 
 ## Cómo funciona

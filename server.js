@@ -262,6 +262,69 @@ function enqueuePreviewJob(fileId, format) {
   return jobId;
 }
 
+// ---------------------------------------------------------------------------
+// Compresión: reduce el peso del video cuidando la calidad.
+// CRF: menor = más calidad y más peso. 22 casi no se nota, 26 es el punto
+// medio habitual y 29 ya se nota un poco, pero pesa muchísimo menos.
+// ---------------------------------------------------------------------------
+
+const COMPRESSION_LEVELS = {
+  alta: { crf: 22, maxHeight: 0, audioBitrate: '128k' },
+  equilibrada: { crf: 26, maxHeight: 1080, audioBitrate: '96k' },
+  maxima: { crf: 29, maxHeight: 720, audioBitrate: '64k' },
+};
+
+// Calidad del mosaico unido (CRF de H.264).
+const MOSAIC_QUALITY_CRF = { alta: 20, normal: 23, comprimida: 27 };
+
+function enqueueCompressJob(fileId, level) {
+  const stored = getStoredFile(fileId);
+  const settings = COMPRESSION_LEVELS[level];
+  const jobId = createJob(stored.originalName);
+  const job = jobs.get(jobId);
+  job.inputBytes = fs.statSync(stored.path).size;
+  job.outputBytes = 0;
+
+  enqueue(async () => {
+    job.status = 'processing';
+    const outputName = `${safeBaseName(stored.originalName)}-comprimido-${level}-${jobId.slice(0, 6)}.mp4`;
+    const outputPath = path.join(OUTPUT_DIR, outputName);
+    const filters = [];
+    // Solo achica videos más grandes que el límite; nunca agranda.
+    if (settings.maxHeight) filters.push(`scale=-2:'min(ih,${settings.maxHeight})'`);
+    filters.push('format=yuv420p');
+
+    const command = ffmpeg(stored.path)
+      .outputOptions(
+        '-map', '0:v:0',
+        '-map', '0:a?',
+        '-vf', filters.join(','),
+        '-c:v', 'libx264',
+        // "medium" comprime mejor que "veryfast" con la misma calidad.
+        '-preset', 'medium',
+        '-crf', String(settings.crf),
+        '-c:a', 'aac',
+        '-b:a', settings.audioBitrate,
+        '-threads', '0',
+        '-movflags', '+faststart'
+      )
+      .toFormat('mp4');
+
+    try {
+      await runCommand(command, outputPath, (p) => {
+        job.progress = p;
+      });
+      finishJob(job, outputName);
+      job.outputBytes = fs.statSync(outputPath).size;
+    } catch (err) {
+      job.status = 'error';
+      job.error = `No se pudo comprimir: ${err.message}`;
+    }
+  });
+
+  return jobId;
+}
+
 function even(n) {
   return Math.max(2, Math.round(n / 2) * 2);
 }
@@ -579,7 +642,7 @@ function enqueueMosaicJob(options) {
       '-map', '[out]',
       '-c:v', 'libx264',
       '-preset', 'veryfast',
-      '-crf', '23',
+      '-crf', String(MOSAIC_QUALITY_CRF[options.quality] || MOSAIC_QUALITY_CRF.normal),
       '-pix_fmt', 'yuv420p',
       '-r', String(options.fps),
       '-threads', '0',
@@ -772,6 +835,18 @@ app.post('/api/import', (req, res) => {
   res.json({ jobId: enqueueImportJob(url) });
 });
 
+app.post('/api/compress', (req, res) => {
+  const fileId = req.body && req.body.fileId;
+  const level = req.body && req.body.level;
+  if (!getStoredFile(fileId)) {
+    return res.status(404).json({ error: 'Video no encontrado. Vuelve a subirlo.' });
+  }
+  if (!COMPRESSION_LEVELS[level]) {
+    return res.status(400).json({ error: 'Nivel de compresión inválido.' });
+  }
+  res.json({ jobId: enqueueCompressJob(fileId, level) });
+});
+
 app.post('/api/preview', (req, res) => {
   const fileId = req.body && req.body.fileId;
   if (!getStoredFile(fileId)) {
@@ -813,7 +888,8 @@ app.post('/api/mosaic', (req, res) => {
   }
   const expectedDuration = Math.max(0, Number(body.expectedDuration) || 0);
 
-  const jobId = enqueueMosaicJob({ items, cols, rows, width, fps, audioIndex, expectedDuration });
+  const quality = MOSAIC_QUALITY_CRF[body.quality] ? body.quality : 'normal';
+  const jobId = enqueueMosaicJob({ items, cols, rows, width, fps, audioIndex, expectedDuration, quality });
   res.json({ jobId });
 });
 

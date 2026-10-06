@@ -392,6 +392,56 @@ label {
   display: none;
 }
 
+.compress-list {
+  list-style: none;
+  margin: 12px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.compress-list:empty {
+  display: none;
+}
+
+.compress-item {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.compress-item-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.compress-item-name {
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+
+.compress-item-state {
+  color: var(--muted);
+}
+
+.compress-item-state.success {
+  color: #86efac;
+}
+
+.compress-item-state.error {
+  color: #fca5a5;
+}
+
+.compress-item .btn {
+  align-self: flex-start;
+}
+
 .merge-status {
   margin-top: 14px;
   display: flex;

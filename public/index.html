@@ -92,6 +92,13 @@
             <option value="3840">4K (3840 px de ancho)</option>
           </select>
         </label>
+        <label>Calidad
+          <select id="quality-select">
+            <option value="alta">Alta (pesa más)</option>
+            <option value="normal" selected>Normal</option>
+            <option value="comprimida">Comprimida (pesa menos)</option>
+          </select>
+        </label>
         <label>Cuadros por segundo
           <select id="fps-select">
             <option value="15">15</option>
@@ -112,6 +119,30 @@
         <div class="progress-track"><div class="progress-fill" id="merge-progress"></div></div>
         <a class="btn success" id="merge-download" hidden>⬇ Descargar mosaico</a>
       </div>
+    </section>
+
+    <section class="merge" id="compress-section">
+      <div class="merge-head">
+        <h2>🗜 Comprimir videos</h2>
+        <p>Reduce el peso de los videos cargados para guardarlos o enviarlos más fácil, cuidando la calidad. El original no se modifica.</p>
+      </div>
+      <div class="merge-form">
+        <label>Video
+          <select id="compress-target">
+            <option value="all">Todas las cámaras</option>
+          </select>
+        </label>
+        <label>Nivel
+          <select id="compress-level">
+            <option value="alta">Alta calidad (casi igual, ahorra menos)</option>
+            <option value="equilibrada" selected>Equilibrado — recomendado</option>
+            <option value="maxima">Máxima compresión (hasta 720p)</option>
+          </select>
+        </label>
+        <button type="button" class="btn primary" id="compress-btn" disabled>🗜 Comprimir y descargar</button>
+      </div>
+      <p class="merge-hint" id="compress-hint"></p>
+      <ul class="compress-list" id="compress-list"></ul>
     </section>
   </main>
 

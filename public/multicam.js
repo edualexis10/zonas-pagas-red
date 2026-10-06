@@ -734,6 +734,110 @@ function snapshot() {
 
 function updateMergeState() {
   mergeBtn.disabled = slots.length === 0 || mergeBtn.dataset.busy === '1';
+  updateCompressOptions();
+}
+
+// ---------------------------------------------------------------------------
+// Comprimir
+// ---------------------------------------------------------------------------
+
+const compressBtn = $('compress-btn');
+const compressTarget = $('compress-target');
+const COMPRESS_HINTS = {
+  alta: 'Casi no se nota diferencia. Útil cuando el video viene sin comprimir o muy pesado desde el DVR.',
+  equilibrada: 'Recomendado: la imagen se ve prácticamente igual y suele pesar entre la mitad y un tercio. Si el video supera 1080p se baja a 1080p.',
+  maxima: 'Pesa mucho menos (ideal para WhatsApp o correo), pero se baja a 720p y se nota un poco en detalles finos como patentes lejanas.',
+};
+
+function formatBytes(bytes) {
+  if (!bytes) return '0 MB';
+  if (bytes >= 1024 ** 3) return `${(bytes / 1024 ** 3).toFixed(2)} GB`;
+  if (bytes >= 1024 ** 2) return `${(bytes / 1024 ** 2).toFixed(1)} MB`;
+  return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+}
+
+function updateCompressOptions() {
+  const previous = compressTarget.value;
+  compressTarget.innerHTML = '<option value="all">Todas las cámaras</option>';
+  slots.forEach((s, i) => {
+    const opt = document.createElement('option');
+    opt.value = String(s.id);
+    opt.textContent = `Cámara ${i + 1} · ${s.name}`;
+    compressTarget.appendChild(opt);
+  });
+  if ([...compressTarget.options].some((o) => o.value === previous)) compressTarget.value = previous;
+  compressBtn.disabled = slots.length === 0 || compressBtn.dataset.busy === '1';
+  $('compress-hint').textContent = COMPRESS_HINTS[$('compress-level').value];
+}
+
+function addCompressRow(name) {
+  const li = document.createElement('li');
+  li.className = 'compress-item';
+  li.innerHTML = `
+    <div class="compress-item-head">
+      <span class="compress-item-name"></span>
+      <span class="compress-item-state">En espera…</span>
+    </div>
+    <div class="progress-track"><div class="progress-fill"></div></div>
+  `;
+  li.querySelector('.compress-item-name').textContent = name;
+  $('compress-list').appendChild(li);
+  const stateEl = li.querySelector('.compress-item-state');
+  const fillEl = li.querySelector('.progress-fill');
+  return {
+    li,
+    set(text, pct, type) {
+      stateEl.textContent = text;
+      stateEl.className = `compress-item-state ${type || ''}`;
+      if (pct !== null && pct !== undefined) fillEl.style.width = `${pct}%`;
+      fillEl.classList.toggle('error', type === 'error');
+    },
+  };
+}
+
+async function compressSlot(slot, level, row, autoDownload) {
+  try {
+    const fileId = await ensureUploaded(slot, (pct) => row.set(`Subiendo… ${pct || 0}%`, (pct || 0) * 0.3));
+    const { jobId } = await postJson('/api/compress', { fileId, level });
+    const job = await waitForJob(jobId, (j) => {
+      if (j.status === 'queued') row.set('En cola…', 30);
+      else row.set(`Comprimiendo… ${j.progress}%`, 30 + j.progress * 0.7);
+    });
+    const saved = job.inputBytes ? Math.min(99, Math.round((1 - job.outputBytes / job.inputBytes) * 100)) : 0;
+    const summary =
+      saved > 0
+        ? `${formatBytes(job.inputBytes)} → ${formatBytes(job.outputBytes)} (−${saved}%)`
+        : `${formatBytes(job.inputBytes)} → ${formatBytes(job.outputBytes)} (el original ya estaba bien comprimido)`;
+    row.set(`✅ ${summary}`, 100, 'success');
+    const link = document.createElement('a');
+    link.className = 'btn success';
+    link.href = job.downloadUrl;
+    link.setAttribute('download', job.fileName);
+    link.textContent = '⬇ Descargar comprimido';
+    row.li.appendChild(link);
+    if (autoDownload) triggerDownload(job.downloadUrl, job.fileName);
+  } catch (err) {
+    row.set(err.message || 'Error al comprimir.', 100, 'error');
+  }
+}
+
+async function compress() {
+  const level = $('compress-level').value;
+  const target = compressTarget.value;
+  const chosen = target === 'all' ? slots.slice() : slots.filter((s) => String(s.id) === target);
+  if (chosen.length === 0) return;
+
+  compressBtn.dataset.busy = '1';
+  updateCompressOptions();
+  $('compress-list').innerHTML = '';
+  // El servidor las procesa en paralelo según sus núcleos disponibles.
+  await Promise.all(
+    chosen.map((slot) =>
+      compressSlot(slot, level, addCompressRow(`Cámara ${slots.indexOf(slot) + 1} · ${slot.name}`), chosen.length === 1)
+    )
+  );
+  delete compressBtn.dataset.busy;
+  updateCompressOptions();
 }
 
 function setMergeStatus(text, pct, type) {
@@ -785,6 +889,7 @@ async function merge() {
       rows,
       width: Number($('width-select').value),
       fps: Number($('fps-select').value),
+      quality: $('quality-select').value,
       audioIndex: Number(audioSelect.value),
       expectedDuration,
     });
@@ -915,6 +1020,8 @@ $('fullscreen-btn').addEventListener('click', () => {
 });
 $('exit-full').addEventListener('click', () => setPseudoFullscreen(false));
 mergeBtn.addEventListener('click', merge);
+compressBtn.addEventListener('click', compress);
+$('compress-level').addEventListener('change', updateCompressOptions);
 
 document.addEventListener('keydown', (e) => {
   if (e.target.matches('input, select, textarea')) return;
