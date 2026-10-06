@@ -746,6 +746,7 @@ const compressTarget = $('compress-target');
 const COMPRESS_HINTS = {
   alta: 'Casi no se nota diferencia. Útil cuando el video viene sin comprimir o muy pesado desde el DVR.',
   equilibrada: 'Recomendado: la imagen se ve prácticamente igual y suele pesar entre la mitad y un tercio. Si el video supera 1080p se baja a 1080p.',
+  extrema: 'Compresión extrema: 480p, 10 cuadros por segundo y audio básico. Solo para casos excepcionales (adjuntar a un correo con límite de tamaño, enviar con mala señal). Se pierde detalle: patentes y rostros lejanos pueden no leerse.',
   maxima: 'Pesa mucho menos (ideal para WhatsApp o correo), pero se baja a 720p y se nota un poco en detalles finos como patentes lejanas.',
 };
 
@@ -769,7 +770,8 @@ function updateCompressOptions() {
   });
   if ([...compressTarget.options].some((o) => o.value === previous)) compressTarget.value = previous;
   compressBtn.disabled = slots.length === 0 || compressBtn.dataset.busy === '1';
-  const hint = COMPRESS_HINTS[$('compress-level').value];
+  $('compress-extreme-btn').disabled = compressBtn.disabled;
+  const hint = COMPRESS_HINTS[compressBtn.dataset.level || $('compress-level').value];
   $('compress-hint').textContent =
     compressTarget.value === 'merge'
       ? `${hint} Se unen todas las cámaras en un solo archivo (misma distribución, retrasos y audio de "Unir en un solo video"), comprimido en un solo paso.`
@@ -777,13 +779,15 @@ function updateCompressOptions() {
 }
 
 // Ancho total del mosaico según el nivel: más compresión, menos resolución.
-const MERGE_WIDTH_BY_LEVEL = { alta: 1920, equilibrada: 1920, maxima: 1280 };
+const MERGE_WIDTH_BY_LEVEL = { alta: 1920, equilibrada: 1920, maxima: 1280, extrema: 960 };
+const MERGE_FPS_BY_LEVEL = { extrema: 10 };
 
 function compressMerged(level) {
   const row = addCompressRow(`Mosaico unido · ${slots.length} cámaras`);
   return merge({
     quality: level,
     width: Math.min(Number($('width-select').value), MERGE_WIDTH_BY_LEVEL[level]),
+    fps: MERGE_FPS_BY_LEVEL[level],
     report: (text, pct, type) => row.set(text, pct, type),
     onDone: (job, audioNote) => {
       const saved = job.inputBytes ? Math.min(99, Math.round((1 - job.outputBytes / job.inputBytes) * 100)) : 0;
@@ -850,8 +854,10 @@ async function compressSlot(slot, level, row, autoDownload) {
   }
 }
 
-async function compress() {
-  const level = $('compress-level').value;
+async function compress(levelOverride) {
+  const level = levelOverride || $('compress-level').value;
+  // Mientras se muestra el resultado, la explicación corresponde al nivel usado.
+  compressBtn.dataset.level = level;
   const target = compressTarget.value;
   const chosen = target === 'all' || target === 'merge' ? slots.slice() : slots.filter((s) => String(s.id) === target);
   if (chosen.length === 0) return;
@@ -926,7 +932,7 @@ async function merge(opts = {}) {
       cols,
       rows,
       width: opts.width || Number($('width-select').value),
-      fps: Number($('fps-select').value),
+      fps: opts.fps || Number($('fps-select').value),
       quality: opts.quality || $('quality-select').value,
       audioIndex: Number(audioSelect.value),
       expectedDuration,
@@ -1062,8 +1068,17 @@ $('fullscreen-btn').addEventListener('click', () => {
 });
 $('exit-full').addEventListener('click', () => setPseudoFullscreen(false));
 mergeBtn.addEventListener('click', () => merge());
-compressBtn.addEventListener('click', compress);
-$('compress-level').addEventListener('change', updateCompressOptions);
+compressBtn.addEventListener('click', () => compress());
+$('compress-extreme-btn').addEventListener('click', () => {
+  const ok = confirm(
+    'Compresión extrema: el video queda en 480p y a 10 cuadros por segundo. Pesa muy poco, pero se pierde detalle (patentes o rostros lejanos pueden no leerse).\n\n¿Continuar?'
+  );
+  if (ok) compress('extrema');
+});
+$('compress-level').addEventListener('change', () => {
+  delete compressBtn.dataset.level;
+  updateCompressOptions();
+});
 compressTarget.addEventListener('change', updateCompressOptions);
 
 document.addEventListener('keydown', (e) => {

@@ -289,11 +289,14 @@ const COMPRESSION_LEVELS = {
   alta: { crf: 21, maxHeight: 0, audioBitrate: '128k', preset: 'veryfast' },
   equilibrada: { crf: 25, maxHeight: 1080, audioBitrate: '96k', preset: 'veryfast' },
   maxima: { crf: 28, maxHeight: 720, audioBitrate: '64k', preset: 'superfast' },
+  // Solo para casos excepcionales (adjuntar a un correo con límite, enviar con
+  // mala señal): 480p, 10 cuadros por segundo y audio mono de baja calidad.
+  extrema: { crf: 32, maxHeight: 480, audioBitrate: '32k', preset: 'superfast', fps: 10, mono: true },
 };
 
 // Calidad del mosaico unido (CRF de H.264). Acepta también los niveles de
 // compresión para "comprimir y unir" en un solo paso.
-const MOSAIC_QUALITY_CRF = { alta: 20, normal: 23, comprimida: 27, equilibrada: 25, maxima: 28 };
+const MOSAIC_QUALITY_CRF = { alta: 20, normal: 23, comprimida: 27, equilibrada: 25, maxima: 28, extrema: 32 };
 
 function enqueueCompressJob(fileId, level, expectedDuration) {
   const stored = getStoredFile(fileId);
@@ -309,6 +312,7 @@ function enqueueCompressJob(fileId, level, expectedDuration) {
     const outputPath = path.join(OUTPUT_DIR, outputName);
     const filters = [];
     // Solo achica videos más grandes que el límite; nunca agranda.
+    if (settings.fps) filters.push(`fps=${settings.fps}`);
     if (settings.maxHeight) filters.push(`scale=-2:'min(ih,${settings.maxHeight})'`);
     filters.push('format=yuv420p');
 
@@ -322,6 +326,7 @@ function enqueueCompressJob(fileId, level, expectedDuration) {
         '-crf', String(settings.crf),
         '-c:a', 'aac',
         '-b:a', settings.audioBitrate,
+        ...(settings.mono ? ['-ac', '1'] : []),
         '-threads', '0',
         '-movflags', '+faststart'
       )
