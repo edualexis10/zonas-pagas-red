@@ -1,7 +1,7 @@
 {
   "name": "zonas-pagas-red",
   "version": "1.0.0",
-  "description": "",
+  "description": "Visor multicámara sincronizado (hasta 8 cámaras), mosaico descargable y conversor de videos",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
@@ -25,5 +25,8 @@
     "fluent-ffmpeg": "^2.1.3",
     "multer": "^2.4.0",
     "tesseract.js": "^7.0.0"
+  },
+  "engines": {
+    "node": ">=20"
   }
 }

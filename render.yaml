@@ -1,0 +1,13 @@
+# Configuración para publicar en Render (https://render.com) con un clic.
+services:
+  - type: web
+    name: visor-multicamara
+    runtime: node
+    plan: free
+    buildCommand: npm install
+    startCommand: npm start
+    healthCheckPath: /healthz
+    autoDeploy: true
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
