@@ -13,6 +13,10 @@ Aplicación web para ver hasta **8 cámaras sincronizadas** a la vez (como un DV
 
 El plan gratis "duerme" tras 15 minutos sin uso (la primera visita tarda ~1 minuto en despertar) y tiene poca CPU, así que unir muchos videos largos es lento; el plan *Starter* es más rápido.
 
+### Alternativa: Railway
+
+En [railway.com](https://railway.com) → **New Project → Deploy from GitHub repo** → `edualexis10/zonas-pagas-red` (usa `railway.json`). Luego en el servicio: **Settings → Networking → Generate Domain** para obtener el enlace público. `APP_PASSWORD` se agrega en **Variables**.
+
 ## Uso
 
 ```bash
