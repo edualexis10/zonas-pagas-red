@@ -46,6 +46,12 @@
       </div>
     </section>
 
+    <section class="tray" id="tray" hidden>
+      <span class="tray-label">📦 Disponibles <small>(no se ven ni se incluyen al unir · arrástralas a una pantalla o pulsa ➕)</small></span>
+      <div class="tray-items" id="tray-items"></div>
+    </section>
+    <div class="move-banner" id="move-banner" hidden></div>
+
     <section id="grid" class="grid" style="--cols: 2; --rows: 2">
     </section>
     <button type="button" class="exit-full" id="exit-full" hidden>✕ Salir</button>
@@ -150,8 +156,12 @@
 
   <div class="modal" id="folder-modal" hidden>
     <div class="modal-box">
-      <h2 id="folder-title">Videos de la carpeta</h2>
+      <h2 id="folder-title">¿Qué cámaras quieres ver?</h2>
       <p class="modal-hint" id="folder-hint"></p>
+      <div class="modal-quick">
+        <button type="button" class="btn ghost" id="folder-all">Marcar todas</button>
+        <button type="button" class="btn ghost" id="folder-none">Ninguna</button>
+      </div>
       <ul class="folder-list" id="folder-list"></ul>
       <div class="modal-actions">
         <button type="button" class="btn ghost" id="folder-cancel">Cancelar</button>

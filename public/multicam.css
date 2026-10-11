@@ -557,6 +557,119 @@ label {
   white-space: nowrap;
 }
 
+/* --- Cámaras disponibles (sacadas de la pantalla) --- */
+
+.tray {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 12px;
+  background: var(--panel);
+  border: 1px dashed var(--border);
+  border-radius: 10px;
+}
+
+.tray-label {
+  font-weight: 700;
+}
+
+.tray-label small {
+  font-weight: 400;
+  color: var(--muted);
+}
+
+.tray-items {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.chip {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  padding: 4px 4px 4px 10px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  cursor: grab;
+}
+
+.chip-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 260px;
+}
+
+.chip button {
+  border: none;
+  border-radius: 999px;
+  padding: 4px 10px;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text);
+  font: inherit;
+  font-size: 0.8rem;
+  cursor: pointer;
+}
+
+.chip button:hover {
+  background: var(--accent);
+}
+
+/* --- Mover cámaras --- */
+
+.move-banner {
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: rgba(59, 130, 246, 0.2);
+  border: 1px solid var(--accent);
+  font-weight: 600;
+  text-align: center;
+}
+
+.drag-handle {
+  cursor: grab;
+  padding: 0 2px;
+  font-size: 0.95rem;
+}
+
+.tile.dragging {
+  opacity: 0.4;
+}
+
+.tile.drop-target {
+  outline: 3px dashed var(--accent);
+  outline-offset: -3px;
+}
+
+.tile.moving {
+  outline: 3px solid var(--accent);
+  outline-offset: -3px;
+}
+
+.tile.move-candidate {
+  cursor: pointer;
+}
+
+.tile.move-candidate::after {
+  content: 'Poner aquí';
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(59, 130, 246, 0.25);
+  font-weight: 700;
+  pointer-events: none;
+}
+
+.modal-quick {
+  display: flex;
+  gap: 8px;
+}
+
 /* --- Elegir videos de una carpeta --- */
 
 .modal {

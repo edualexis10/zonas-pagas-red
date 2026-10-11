@@ -24,6 +24,8 @@ const audioSelect = $('audio-select');
 const mergeBtn = $('merge-btn');
 
 let slots = []; // { id, file, sourceUrl, name, delay, duration, ready, video, tile, statusEl, url, objectUrl, fileIdPromise, audio }
+let tray = []; // cámaras sacadas de la pantalla ("Disponibles"): no se ven ni se unen
+let movingId = null; // cámara elegida con ✥ esperando que se toque su nuevo lugar
 let nextId = 1;
 let clock = 0; // tiempo del visor (s); cada cámara muestra clock - delay
 let playing = false;
@@ -203,13 +205,14 @@ async function addFolder(folderUrl) {
   try {
     const { files } = await postJson('/api/folder', { url: folderUrl });
     const free = MAX_CAMERAS - slots.length;
-    if (free <= 0) {
-      alert(`Ya hay ${MAX_CAMERAS} cámaras cargadas. Quita alguna para agregar más.`);
-      return;
-    }
-    const chosen = files.length <= free ? files : await pickFolderFiles(files, free);
+    // Siempre se deja elegir qué cámaras ver; las demás quedan en "Disponibles".
+    const picked = await pickFolderFiles(files, Math.max(0, free));
+    if (!picked) return;
+    const { chosen, rest } = picked;
+    const toSource = (f) => ({ sourceUrl: f.url, name: f.name, keepName: true });
+    if (rest.length) addSources(rest.map(toSource), { toTray: true });
     if (chosen.length) {
-      addSources(chosen.map((f) => ({ sourceUrl: f.url, name: f.name, keepName: true })));
+      addSources(chosen.map(toSource));
       if (layoutChoice !== 'auto' && chosen.length > 1) {
         // Ajusta las pantallas a la cantidad cargada.
         layoutChoice = 'auto';
@@ -232,18 +235,21 @@ function pickFolderFiles(files, max) {
     list.innerHTML = '';
     files.forEach((file, i) => {
       const li = document.createElement('li');
-      li.innerHTML = `<label><input type="checkbox" value="${i}" ${i < max ? 'checked' : ''} /> <span></span></label>`;
+      li.innerHTML = `<label><input type="checkbox" value="${i}" ${i < Math.min(max, 4) ? 'checked' : ''} /> <span></span></label>`;
       li.querySelector('span').textContent = file.name;
       list.appendChild(li);
     });
     const checks = Array.from(list.querySelectorAll('input'));
     const update = () => {
       const n = checks.filter((c) => c.checked).length;
-      $('folder-hint').textContent = `La carpeta tiene ${files.length} videos y caben ${max}. Elige cuáles ver (${n} de ${max}).`;
+      $('folder-hint').textContent =
+        max === 0
+          ? `La carpeta tiene ${files.length} videos. La pantalla ya está llena: todos quedarán en "Disponibles".`
+          : `La carpeta tiene ${files.length} videos. Marca los que quieres ver ahora (${n} de máximo ${max}). Los demás quedan en "Disponibles" por si los necesitas.`;
       checks.forEach((c) => {
         c.disabled = !c.checked && n >= max;
       });
-      addBtn.disabled = n === 0;
+      addBtn.textContent = n ? `Ver ${n} cámara${n === 1 ? '' : 's'}` : 'Guardar en Disponibles';
     };
     list.onchange = update;
     update();
@@ -255,8 +261,24 @@ function pickFolderFiles(files, max) {
       addBtn.onclick = null;
       resolve(result);
     };
-    $('folder-cancel').onclick = () => close([]);
-    addBtn.onclick = () => close(checks.filter((c) => c.checked).map((c) => files[Number(c.value)]));
+    $('folder-cancel').onclick = () => close(null);
+    $('folder-all').onclick = () => {
+      checks.forEach((c, i) => {
+        c.checked = i < max;
+      });
+      update();
+    };
+    $('folder-none').onclick = () => {
+      checks.forEach((c) => {
+        c.checked = false;
+      });
+      update();
+    };
+    addBtn.onclick = () =>
+      close({
+        chosen: checks.filter((c) => c.checked).map((c) => files[Number(c.value)]),
+        rest: checks.filter((c) => !c.checked).map((c) => files[Number(c.value)]),
+      });
   });
 }
 
@@ -271,12 +293,21 @@ function nameFromUrl(url) {
   }
 }
 
-function addSources(sources) {
-  const free = MAX_CAMERAS - slots.length;
-  if (sources.length > free) {
-    alert(`Solo caben ${MAX_CAMERAS} cámaras. Se agregarán ${Math.max(0, free)} de ${sources.length} videos.`);
+// Agrega videos a la pantalla. Los que no caben (o si se pide con
+// { toTray: true }) quedan en "Disponibles" sin cargarse, para no gastar
+// descargas ni conversiones en cámaras que quizá no se usen.
+function addSources(sources, { toTray = false } = {}) {
+  const free = toTray ? 0 : Math.max(0, MAX_CAMERAS - slots.length);
+  const extra = sources.slice(free);
+  if (extra.length) {
+    extra.forEach((source) => tray.push(createSlot(source)));
+    if (!toTray) {
+      alert(
+        `Solo caben ${MAX_CAMERAS} cámaras en pantalla. ${extra.length} quedaron en "Disponibles": agrégalas cuando quieras sacando otra.`
+      );
+    }
   }
-  sources.slice(0, Math.max(0, free)).forEach((source) => {
+  sources.slice(0, free).forEach((source) => {
     const slot = createSlot(source);
     if (pendingTarget !== null && pendingTarget < slots.length) {
       slots.splice(pendingTarget, 0, slot);
@@ -288,6 +319,7 @@ function addSources(sources) {
   });
   pendingTarget = null;
   render();
+  renderTray();
 }
 
 function createSlot({ file = null, sourceUrl = null, name, keepName = false }) {
@@ -332,6 +364,7 @@ function isShareLink(url) {
 }
 
 function loadSlot(slot) {
+  slot.loaded = true;
   if (SERVER_ONLY_EXT.includes(extOf(slot.name)) || (slot.sourceUrl && isShareLink(slot.sourceUrl))) {
     loadViaServer(slot);
     return;
@@ -409,9 +442,10 @@ function markReady(slot) {
 }
 
 function removeSlot(id) {
-  const idx = slots.findIndex((s) => s.id === id);
+  const list = slots.some((s) => s.id === id) ? slots : tray;
+  const idx = list.findIndex((s) => s.id === id);
   if (idx < 0) return;
-  const [slot] = slots.splice(idx, 1);
+  const [slot] = list.splice(idx, 1);
   slot.removed = true;
   slot.video.pause();
   slot.video.removeAttribute('src');
@@ -419,7 +453,104 @@ function removeSlot(id) {
   if (slot.objectUrl) URL.revokeObjectURL(slot.objectUrl);
   if (focusedId === id) focusedId = null;
   render();
+  renderTray();
   updateTimeline();
+}
+
+// Saca la cámara de la pantalla sin borrarla: queda en "Disponibles" con su
+// video ya cargado, lista para volver.
+function moveToTray(id) {
+  const idx = slots.findIndex((s) => s.id === id);
+  if (idx < 0) return;
+  const [slot] = slots.splice(idx, 1);
+  slot.video.pause();
+  slot.audio = false;
+  slot.video.muted = true;
+  if (focusedId === id) focusedId = null;
+  tray.push(slot);
+  render();
+  renderTray();
+  updateTimeline();
+  syncAll(true);
+}
+
+// Devuelve una cámara de "Disponibles" a la pantalla (en la posición dada).
+function activateFromTray(id, atIndex = slots.length) {
+  const idx = tray.findIndex((s) => s.id === id);
+  if (idx < 0) return false;
+  if (slots.length >= MAX_CAMERAS) {
+    alert(`Ya hay ${MAX_CAMERAS} cámaras en pantalla. Saca una (botón ⤓) para poner esta.`);
+    return false;
+  }
+  const [slot] = tray.splice(idx, 1);
+  slots.splice(Math.min(atIndex, slots.length), 0, slot);
+  if (!slot.loaded) loadSlot(slot);
+  render();
+  renderTray();
+  updateTimeline();
+  syncAll(true);
+  return true;
+}
+
+// Mueve una cámara a otra posición de la grilla. Si ahí había otra cámara,
+// intercambian lugares; si la celda estaba vacía, pasa al final.
+function placeSlot(id, targetIndex) {
+  const from = slots.findIndex((s) => s.id === id);
+  if (from >= 0) {
+    if (targetIndex >= slots.length) {
+      const [slot] = slots.splice(from, 1);
+      slots.push(slot);
+    } else if (targetIndex !== from) {
+      [slots[from], slots[targetIndex]] = [slots[targetIndex], slots[from]];
+    }
+  } else if (tray.some((s) => s.id === id)) {
+    // Desde "Disponibles" sobre una cámara: entra en su lugar y la otra sale.
+    if (targetIndex < slots.length && slots.length >= MAX_CAMERAS) {
+      const replaced = slots[targetIndex];
+      moveToTray(replaced.id);
+    }
+    activateFromTray(id, targetIndex);
+    return;
+  }
+  render();
+  syncAll(true);
+}
+
+function setMoving(id) {
+  movingId = movingId === id ? null : id;
+  const banner = $('move-banner');
+  if (movingId !== null) {
+    const slot = slots.find((s) => s.id === movingId);
+    banner.textContent = `Toca el lugar donde quieres poner CAM ${slots.indexOf(slot) + 1} (o toca ✥ otra vez para cancelar).`;
+  }
+  banner.hidden = movingId === null;
+  render();
+}
+
+function renderTray() {
+  const section = $('tray');
+  const items = $('tray-items');
+  section.hidden = tray.length === 0;
+  items.innerHTML = '';
+  tray.forEach((slot) => {
+    const chip = document.createElement('div');
+    chip.className = 'chip';
+    chip.draggable = true;
+    chip.innerHTML = `
+      <span class="chip-name"></span>
+      <button type="button" data-act="add" title="Mostrar en pantalla">➕ Mostrar</button>
+      <button type="button" data-act="delete" title="Eliminar del todo">🗑</button>
+    `;
+    chip.querySelector('.chip-name').textContent = slot.name;
+    chip.title = slot.loaded ? 'Ya cargada' : 'Se cargará al mostrarla';
+    chip.querySelector('[data-act="add"]').onclick = () => activateFromTray(slot.id);
+    chip.querySelector('[data-act="delete"]').onclick = () => removeSlot(slot.id);
+    chip.addEventListener('dragstart', (e) => {
+      e.dataTransfer.setData('text/x-cam', String(slot.id));
+      e.dataTransfer.effectAllowed = 'move';
+    });
+    items.appendChild(chip);
+  });
 }
 
 function moveSlot(id, dir) {
@@ -535,6 +666,25 @@ function updateAudioHint() {
   $('audio-hint').textContent = text;
 }
 
+// Permite soltar ahí una cámara arrastrada (de la grilla o de "Disponibles").
+function makeDropTarget(tile, index) {
+  tile.addEventListener('dragover', (e) => {
+    if (!Array.from(e.dataTransfer.types).includes('text/x-cam')) return;
+    e.preventDefault();
+    e.stopPropagation();
+    tile.classList.add('drop-target');
+  });
+  tile.addEventListener('dragleave', () => tile.classList.remove('drop-target'));
+  tile.addEventListener('drop', (e) => {
+    const id = Number(e.dataTransfer.getData('text/x-cam'));
+    if (!id) return;
+    e.preventDefault();
+    e.stopPropagation();
+    tile.classList.remove('drop-target');
+    placeSlot(id, index);
+  });
+}
+
 function buildEmptyTile(index) {
   const tile = document.createElement('div');
   tile.className = 'tile empty';
@@ -544,9 +694,16 @@ function buildEmptyTile(index) {
   }
   tile.innerHTML = `<span>+ Cámara ${index + 1}</span><small>Clic o arrastra un video</small>`;
   tile.addEventListener('click', () => {
+    if (movingId !== null) {
+      const id = movingId;
+      setMoving(id);
+      placeSlot(id, index);
+      return;
+    }
     pendingTarget = Math.min(index, slots.length);
     fileInput.click();
   });
+  makeDropTarget(tile, index);
   return tile;
 }
 
@@ -554,6 +711,8 @@ function buildTile(slot, index) {
   const tile = document.createElement('div');
   tile.className = 'tile';
   if (slot.audio) tile.classList.add('has-audio');
+  if (movingId === slot.id) tile.classList.add('moving');
+  else if (movingId !== null) tile.classList.add('move-candidate');
 
   tile.appendChild(slot.video);
 
@@ -566,16 +725,18 @@ function buildTile(slot, index) {
   const bar = document.createElement('div');
   bar.className = 'tile-bar';
   bar.innerHTML = `
-    <span class="cam-label" title="${escapeHtml(slot.sourceUrl || slot.name)}">CAM ${index + 1} · <span>${escapeHtml(slot.name)}</span></span>
+    <span class="cam-label" title="${escapeHtml(slot.sourceUrl || slot.name)}"><span class="drag-handle" draggable="true" title="Arrastra para mover esta cámara">⠿</span> CAM ${index + 1} · <span>${escapeHtml(slot.name)}</span></span>
     <span class="tile-tools">
       <label title="Retraso en segundos: positivo = esta cámara empieza después; negativo = se recorta su inicio">
         ⏱<input type="number" step="0.1" value="${slot.delay}" class="delay-input" />s
       </label>
       <button type="button" data-act="audio" title="Escuchar el audio de esta cámara">${slot.audio ? '🔊' : '🔇'}</button>
+      <button type="button" data-act="move" title="Mover: toca este botón y luego el lugar de destino">✥</button>
       <button type="button" data-act="left" title="Mover antes">◀</button>
       <button type="button" data-act="right" title="Mover después">▶</button>
       <button type="button" data-act="focus" title="Ampliar / volver a la grilla">${focusedId === slot.id ? '▦' : '⤢'}</button>
-      <button type="button" data-act="remove" title="Quitar">✕</button>
+      <button type="button" data-act="tray" title="Sacar de la pantalla (queda en Disponibles)">⤓</button>
+      <button type="button" data-act="remove" title="Eliminar del todo">🗑</button>
     </span>
   `;
   tile.appendChild(bar);
@@ -595,6 +756,8 @@ function buildTile(slot, index) {
       if (act === 'left') moveSlot(slot.id, -1);
       if (act === 'right') moveSlot(slot.id, 1);
       if (act === 'remove') removeSlot(slot.id);
+      if (act === 'tray') moveToTray(slot.id);
+      if (act === 'move') setMoving(slot.id);
       if (act === 'focus') toggleFocus(slot.id);
     });
   });
@@ -602,8 +765,24 @@ function buildTile(slot, index) {
   // En pantallas táctiles no hay "hover": un toque muestra/oculta los botones.
   tile.addEventListener('click', (e) => {
     if (e.target.closest('.tile-tools')) return;
+    if (movingId !== null && movingId !== slot.id) {
+      const id = movingId;
+      setMoving(id);
+      placeSlot(id, slots.indexOf(slot));
+      return;
+    }
     if (window.matchMedia('(hover: none), (max-width: 700px)').matches) tile.classList.toggle('show-tools');
   });
+
+  const handle = bar.querySelector('.drag-handle');
+  handle.addEventListener('dragstart', (e) => {
+    e.dataTransfer.setData('text/x-cam', String(slot.id));
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setDragImage(tile, 20, 20);
+    tile.classList.add('dragging');
+  });
+  handle.addEventListener('dragend', () => tile.classList.remove('dragging'));
+  makeDropTarget(tile, slots.indexOf(slot));
 
   // Al reinsertar el elemento en el DOM se pausa: lo reanudamos si corresponde.
   if (playing) requestAnimationFrame(() => syncAll(true));
@@ -1000,7 +1179,7 @@ fileInput.addEventListener('cancel', () => {
 });
 
 $('clear-btn').addEventListener('click', () => {
-  slots.slice().forEach((s) => removeSlot(s.id));
+  [...slots, ...tray].forEach((s) => removeSlot(s.id));
   setPlaying(false);
   clock = 0;
   updateTimeline();
@@ -1094,7 +1273,8 @@ document.addEventListener('keydown', (e) => {
   } else if (e.key === '.') {
     setPlaying(false);
     seek(clock + FRAME_STEP);
-  } else if (e.key === 'Escape' && document.body.classList.contains('pseudo-full')) setPseudoFullscreen(false);
+  } else if (e.key === 'Escape' && movingId !== null) setMoving(movingId);
+  else if (e.key === 'Escape' && document.body.classList.contains('pseudo-full')) setPseudoFullscreen(false);
   else if (e.key === 'Escape' && focusedId !== null) toggleFocus(focusedId);
 });
 
