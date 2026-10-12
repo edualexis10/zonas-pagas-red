@@ -24,6 +24,8 @@ const audioSelect = $('audio-select');
 const mergeBtn = $('merge-btn');
 
 let slots = []; // { id, file, sourceUrl, name, delay, duration, ready, video, tile, statusEl, url, objectUrl, fileIdPromise, audio }
+let trim = null; // { start, end } en segundos de la línea de tiempo común
+let clockBase = null; // hora real (ms) del segundo 0, si se sincronizó por nombre
 let tray = []; // cámaras sacadas de la pantalla ("Disponibles"): no se ven ni se unen
 let movingId = null; // cámara elegida con ✥ esperando que se toque su nuevo lugar
 let nextId = 1;
@@ -939,12 +941,18 @@ function totalDuration() {
   return slots.reduce((max, s) => (s.ready ? Math.max(max, s.delay + s.duration) : max), 0);
 }
 
+function timeText(total) {
+  const base = `${formatTime(clock)} / ${formatTime(total)}`;
+  return clockBase !== null ? `🕒 ${formatClock(clock)}  ·  ${base}` : base;
+}
+
 function updateTimeline() {
   const total = totalDuration();
   timeline.max = String(total);
   if (clock > total) clock = total;
   timeline.value = String(clock);
-  timeLabel.textContent = `${formatTime(clock)} / ${formatTime(total)}`;
+  timeLabel.textContent = timeText(total);
+  paintTrimRange(total);
 }
 
 // Ajusta cada video a "clock - retraso". Con force=true salta siempre a la
@@ -982,8 +990,13 @@ function tick(ts) {
       lastSync = ts;
       syncAll(false);
     }
+    // Con recorte, la reproducción se detiene al final del tramo.
+    if (trim && clock >= trim.end && clock - ((ts - (lastFrameTs || ts)) / 1000) * rate < trim.end) {
+      clock = trim.end;
+      setPlaying(false);
+    }
     timeline.value = String(clock);
-    timeLabel.textContent = `${formatTime(clock)} / ${formatTime(total)}`;
+    timeLabel.textContent = timeText(total);
   }
   lastFrameTs = ts;
   requestAnimationFrame(tick);
@@ -992,7 +1005,8 @@ function tick(ts) {
 function setPlaying(value) {
   const anyReady = slots.some((s) => s.ready);
   playing = value && anyReady;
-  if (playing && clock >= totalDuration() - 0.05) clock = 0;
+  if (playing && trim && (clock < trim.start || clock >= trim.end - 0.05)) clock = trim.start;
+  else if (playing && clock >= totalDuration() - 0.05) clock = 0;
   playBtn.textContent = playing ? '⏸' : '▶';
   syncAll(true);
 }
@@ -1047,6 +1061,7 @@ function snapshot() {
 function updateMergeState() {
   mergeBtn.disabled = slots.length === 0 || mergeBtn.dataset.busy === '1';
   updateCompressOptions();
+  if (typeof updateTrimUI === 'function' && $('trim-hint')) updateTrimUI();
 }
 
 // ---------------------------------------------------------------------------
@@ -1115,7 +1130,7 @@ function compressMerged(level) {
   });
 }
 
-function addCompressRow(name) {
+function addCompressRow(name, list = $('compress-list')) {
   const li = document.createElement('li');
   li.className = 'compress-item';
   li.innerHTML = `
@@ -1126,7 +1141,7 @@ function addCompressRow(name) {
     <div class="progress-track"><div class="progress-fill"></div></div>
   `;
   li.querySelector('.compress-item-name').textContent = name;
-  $('compress-list').appendChild(li);
+  list.appendChild(li);
   const stateEl = li.querySelector('.compress-item-state');
   const fillEl = li.querySelector('.progress-fill');
   return {
@@ -1140,23 +1155,48 @@ function addCompressRow(name) {
   };
 }
 
+// Tramo de esta cámara que corresponde al recorte común (en segundos de la
+// propia cámara). null = la cámara no tiene imagen en ese tramo.
+function cameraRange(slot) {
+  if (!trim) return { start: 0, length: 0 };
+  const start = Math.max(0, trim.start - slot.delay);
+  const end = Math.min(slot.duration || Infinity, trim.end - slot.delay);
+  if (end <= start) return null;
+  return { start, length: end - start };
+}
+
 async function compressSlot(slot, level, row, autoDownload) {
+  const range = cameraRange(slot);
+  if (!range) {
+    row.set('Sin imagen en el tramo elegido: se omite.', 100, 'error');
+    return;
+  }
   try {
     const job = await withFile(
       slot,
       (pct, bytes, note) => row.set(`Subiendo… ${pct || 0}%${note ? ` (${note})` : ''}`, (pct || 0) * 0.3),
       (fileId) =>
         runServerJob(
-          () => postJson('/api/compress', { fileId, level, expectedDuration: slot.duration || 0 }),
+          () =>
+            postJson('/api/compress', {
+              fileId,
+              level,
+              expectedDuration: slot.duration || 0,
+              start: range.start,
+              length: range.length,
+            }),
           (j) => {
+            const verb = level === 'corte' ? 'Cortando' : 'Comprimiendo';
             if (j.status === 'queued') row.set('En cola…', 30);
-            else row.set(`Comprimiendo… ${j.progress}%`, 30 + j.progress * 0.7);
+            else row.set(`${verb}… ${j.progress}%`, 30 + j.progress * 0.7);
           }
         )
     );
     const saved = job.inputBytes ? Math.min(99, Math.round((1 - job.outputBytes / job.inputBytes) * 100)) : 0;
     const summary =
-      saved > 0
+      level === 'corte'
+        ? `tramo de ${formatTime(range.length || slot.duration)} · ${formatBytes(job.outputBytes)}`
+        : saved > 0
         ? `${formatBytes(job.inputBytes)} → ${formatBytes(job.outputBytes)} (−${saved}%)`
         : `${formatBytes(job.inputBytes)} → ${formatBytes(job.outputBytes)} (el original ya estaba bien comprimido)`;
     row.set(`✅ ${summary}`, 100, 'success');
@@ -1164,7 +1204,7 @@ async function compressSlot(slot, level, row, autoDownload) {
     link.className = 'btn success';
     link.href = job.downloadUrl;
     link.setAttribute('download', job.fileName);
-    link.textContent = '⬇ Descargar comprimido';
+    link.textContent = level === 'corte' ? '⬇ Descargar corte' : '⬇ Descargar comprimido';
     row.li.appendChild(link);
     if (autoDownload) triggerDownload(job.downloadUrl, job.fileName);
   } catch (err) {
@@ -1259,7 +1299,9 @@ async function merge(opts = {}) {
       ? current.reduce((max, s) => Math.max(max, s.delay + s.duration), 0)
       : 0;
     const mosaicBody = () => ({
-      items: current.map((slot, i) => ({ fileId: fileIds[i], delay: slot.delay })),
+      items: current.map((slot, i) => ({ fileId: fileIds[i], delay: slot.delay, duration: slot.duration || 0 })),
+      start: trim ? trim.start : 0,
+      end: trim ? trim.end : 0,
       cols,
       rows,
       width: opts.width || Number($('width-select').value),
@@ -1311,6 +1353,175 @@ async function merge(opts = {}) {
     updateMergeState();
   }
 }
+
+// ---------------------------------------------------------------------------
+// Recorte y sincronización por hora del nombre
+// ---------------------------------------------------------------------------
+
+function pad2(n) {
+  return String(n).padStart(2, '0');
+}
+
+// Hora real (HH:MM:SS) de un segundo de la línea de tiempo.
+function formatClock(t) {
+  const d = new Date(clockBase + Math.round(t * 1000));
+  return `${pad2(d.getHours())}:${pad2(d.getMinutes())}:${pad2(d.getSeconds())}`;
+}
+
+// Texto para los campos Desde/Hasta: hora real si se sincronizó por nombre,
+// si no tiempo del video (h:mm:ss).
+function formatTrimField(t) {
+  if (clockBase !== null) return formatClock(t);
+  const s = Math.round(t);
+  return `${pad2(Math.floor(s / 3600))}:${pad2(Math.floor((s % 3600) / 60))}:${pad2(s % 60)}`;
+}
+
+// Acepta "1:23", "01:23:45", "83" (segundos) o, con hora real, "09:35:00".
+function parseTrimField(text) {
+  const parts = String(text).trim().split(/[:.,h m]+/).filter(Boolean).map(Number);
+  if (!parts.length || parts.some((n) => !Number.isFinite(n) || n < 0)) return null;
+  const secs = parts.reduce((acc, n) => acc * 60 + n, 0);
+  if (clockBase === null) return secs;
+  // Hora del día: se convierte a segundos desde el inicio de la grabación.
+  const hms = parts.length === 2 ? secs * 60 : secs;
+  const base = new Date(clockBase);
+  const baseSecs = base.getHours() * 3600 + base.getMinutes() * 60 + base.getSeconds() + base.getMilliseconds() / 1000;
+  let t = hms - baseSecs;
+  if (t < -60) t += 86400; // pasó la medianoche
+  return Math.max(0, t);
+}
+
+function paintTrimRange(total) {
+  if (!trim || !total) {
+    timeline.style.background = '';
+    return;
+  }
+  const a = (trim.start / total) * 100;
+  const b = (trim.end / total) * 100;
+  timeline.style.background = `linear-gradient(to right, #334155 ${a}%, #f59e0b ${a}%, #f59e0b ${b}%, #334155 ${b}%)`;
+  timeline.style.borderRadius = '999px';
+  timeline.style.height = '6px';
+}
+
+function setTrim(start, end) {
+  const total = totalDuration();
+  start = Math.max(0, Math.min(start ?? 0, total));
+  end = Math.max(0, Math.min(end ?? total, total));
+  trim = end - start >= 0.5 ? { start, end } : null;
+  updateTrimUI();
+  updateTimeline();
+}
+
+function updateTrimUI() {
+  const has = !!trim;
+  const startEl = $('trim-start');
+  const endEl = $('trim-end');
+  if (document.activeElement !== startEl) startEl.value = has ? formatTrimField(trim.start) : '';
+  if (document.activeElement !== endEl) endEl.value = has ? formatTrimField(trim.end) : '';
+  startEl.placeholder = clockBase !== null ? 'hh:mm:ss (hora)' : '00:00:00';
+  endEl.placeholder = startEl.placeholder;
+  const text = has
+    ? `Tramo: ${formatTrimField(trim.start)} → ${formatTrimField(trim.end)} (${formatTime(trim.end - trim.start)}). ` +
+      'Se usa al reproducir, al unir, al comprimir y al cortar.'
+    : 'Sin recorte: se usa el video completo. Marca el inicio y el fin mientras miras, o escribe los tiempos.';
+  $('trim-hint').textContent = text;
+  const ready = slots.length > 0 && slots.some((s) => s.ready);
+  $('trim-cut-btn').disabled = !ready || $('trim-cut-btn').dataset.busy === '1';
+  $('trim-merge-btn').disabled = !ready || mergeBtn.dataset.busy === '1';
+  // Aviso en "Unir" y "Comprimir" para que se note que hay un recorte activo.
+  document.querySelectorAll('.trim-badge').forEach((el) => el.remove());
+  if (has) {
+    ['merge-section-head', 'compress-section-head'].forEach((id) => {
+      const head = $(id);
+      if (!head) return;
+      const badge = document.createElement('span');
+      badge.className = 'trim-badge';
+      badge.textContent = `✂ Solo el tramo ${formatTrimField(trim.start)} → ${formatTrimField(trim.end)}`;
+      head.appendChild(badge);
+    });
+  }
+}
+
+// Busca la hora de inicio en el nombre del archivo del DVR. Formatos:
+//  - 20261006093000 (AAAAMMDDhhmmss)
+//  - 261005-050000-074700 (AAMMDD-inicio-fin)
+//  - ch1_261006093000_261006095000 (AAMMDDhhmmss)
+function startTimeFromName(name) {
+  const valid = (y, mo, d, h, mi, se) => mo >= 1 && mo <= 12 && d >= 1 && d <= 31 && h < 24 && mi < 60 && se < 60;
+  const make = (y, mo, d, h, mi, se) => (valid(y, mo, d, h, mi, se) ? new Date(y, mo - 1, d, h, mi, se).getTime() : null);
+  let m = name.match(/(?<!\d)(20\d{2})(\d{2})(\d{2})[_-]?(\d{2})(\d{2})(\d{2})(?!\d)/);
+  if (m) {
+    const t = make(+m[1], +m[2], +m[3], +m[4], +m[5], +m[6]);
+    if (t) return t;
+  }
+  m = name.match(/(?<!\d)(\d{2})(\d{2})(\d{2})[-_](\d{2})(\d{2})(\d{2})[-_]\d{6}(?!\d)/);
+  if (m) {
+    const t = make(2000 + +m[1], +m[2], +m[3], +m[4], +m[5], +m[6]);
+    if (t) return t;
+  }
+  m = name.match(/(?<!\d)(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})(\d{2})(?!\d)/);
+  if (m) {
+    const t = make(2000 + +m[1], +m[2], +m[3], +m[4], +m[5], +m[6]);
+    if (t) return t;
+  }
+  return null;
+}
+
+function syncByNames() {
+  const found = slots.map((s) => ({ slot: s, t: startTimeFromName(s.name) }));
+  const ok = found.filter((f) => f.t !== null);
+  const hint = $('sync-hint');
+  if (ok.length === 0) {
+    hint.textContent = '⚠ Ningún nombre de archivo trae la hora de inicio. Ajusta el retraso (⏱) de cada cámara a mano.';
+    return;
+  }
+  const base = Math.min(...ok.map((f) => f.t));
+  ok.forEach(({ slot, t }) => {
+    slot.delay = Math.round((t - base) / 100) / 10;
+  });
+  clockBase = base;
+  const missing = found.filter((f) => f.t === null).map((f) => `CAM ${slots.indexOf(f.slot) + 1}`);
+  hint.textContent =
+    `✅ Sincronizadas ${ok.length} cámara(s) desde las ${formatClock(0)}.` +
+    (missing.length ? ` ⚠ Sin hora en el nombre: ${missing.join(', ')} (ajusta su ⏱ a mano).` : '');
+  render();
+  updateTrimUI();
+  updateTimeline();
+  syncAll(true);
+}
+
+async function cutEachCamera() {
+  const btn = $('trim-cut-btn');
+  const list = $('trim-list');
+  list.innerHTML = '';
+  btn.dataset.busy = '1';
+  updateTrimUI();
+  await Promise.all(
+    slots.map((slot, i) => compressSlot(slot, 'corte', addCompressRow(`Cámara ${i + 1} · ${slot.name}`, list), false))
+  );
+  delete btn.dataset.busy;
+  updateTrimUI();
+}
+
+$('sync-names-btn').addEventListener('click', syncByNames);
+$('trim-mark-start').addEventListener('click', () => setTrim(clock, trim && trim.end > clock ? trim.end : totalDuration()));
+$('trim-mark-end').addEventListener('click', () => setTrim(trim && trim.start < clock ? trim.start : 0, clock));
+$('trim-clear').addEventListener('click', () => setTrim(0, 0));
+['trim-start', 'trim-end'].forEach((id) => {
+  const el = $(id);
+  el.addEventListener('change', () => {
+    const start = parseTrimField($('trim-start').value || '0');
+    const end = $('trim-end').value ? parseTrimField($('trim-end').value) : totalDuration();
+    const bad = start === null || end === null || end <= start;
+    el.classList.toggle('invalid', bad);
+    if (!bad) setTrim(start, end);
+  });
+});
+$('trim-cut-btn').addEventListener('click', cutEachCamera);
+$('trim-merge-btn').addEventListener('click', () => {
+  $('merge-section-head').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  merge();
+});
 
 // ---------------------------------------------------------------------------
 // Eventos

@@ -918,3 +918,38 @@ body.pseudo-full .grid {
     width: min(100%, calc((100vh - 16px) * 16 / 9 * var(--cols) / var(--rows)));
   }
 }
+
+/* --- Recorte --- */
+
+.trim-form input[type='text'] {
+  width: 120px;
+  background: var(--panel-2);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 6px 8px;
+  font: inherit;
+  font-variant-numeric: tabular-nums;
+}
+
+.trim-form input.invalid {
+  border-color: var(--danger);
+}
+
+.trim-badge {
+  display: inline-block;
+  margin-top: 6px;
+  padding: 4px 10px;
+  border-radius: 999px;
+  background: rgba(245, 158, 11, 0.15);
+  border: 1px solid #f59e0b;
+  color: #fbbf24;
+  font-size: 0.85rem;
+  font-weight: 600;
+}
+
+@media (max-width: 700px) {
+  .trim-form input[type='text'] {
+    width: 100%;
+  }
+}

@@ -84,8 +84,36 @@
       </div>
     </section>
 
-    <section class="merge">
+    <section class="merge" id="trim-section">
       <div class="merge-head">
+        <h2>✂ Recortar y sincronizar</h2>
+        <p>Elige el tramo que quieres (el mismo momento en todas las cámaras). Se aplica al ver, al unir, al comprimir y al cortar cada cámara.</p>
+      </div>
+      <div class="merge-form">
+        <button type="button" class="btn ghost" id="sync-names-btn" title="Usa la hora que viene en el nombre de cada archivo del DVR para alinear las cámaras">⏱ Sincronizar por hora del archivo</button>
+      </div>
+      <p class="merge-hint" id="sync-hint"></p>
+      <div class="merge-form trim-form">
+        <label>Desde
+          <input type="text" id="trim-start" placeholder="00:00:00" inputmode="numeric" />
+        </label>
+        <button type="button" class="btn ghost" id="trim-mark-start" title="Usa el momento que se está viendo">⤓ Marcar inicio aquí</button>
+        <label>Hasta
+          <input type="text" id="trim-end" placeholder="00:00:00" inputmode="numeric" />
+        </label>
+        <button type="button" class="btn ghost" id="trim-mark-end" title="Usa el momento que se está viendo">⤓ Marcar fin aquí</button>
+        <button type="button" class="btn ghost" id="trim-clear">Quitar recorte</button>
+      </div>
+      <p class="merge-hint" id="trim-hint"></p>
+      <div class="merge-form">
+        <button type="button" class="btn primary" id="trim-cut-btn" disabled>✂ Cortar cada cámara y descargar</button>
+        <button type="button" class="btn primary" id="trim-merge-btn" disabled>✂ Unir el tramo en un solo video</button>
+      </div>
+      <ul class="compress-list" id="trim-list"></ul>
+    </section>
+
+    <section class="merge">
+      <div class="merge-head" id="merge-section-head">
         <h2>Unir en un solo video</h2>
         <p>Combina las cámaras cargadas en un mosaico, con la misma distribución y retrasos del visor, y descárgalo como MP4.</p>
       </div>
@@ -128,7 +156,7 @@
     </section>
 
     <section class="merge" id="compress-section">
-      <div class="merge-head">
+      <div class="merge-head" id="compress-section-head">
         <h2>🗜 Comprimir videos</h2>
         <p>Reduce el peso para guardar o enviar más fácil, cuidando la calidad. Puedes unir todas las cámaras y comprimir en un solo paso. El original no se modifica.</p>
       </div>

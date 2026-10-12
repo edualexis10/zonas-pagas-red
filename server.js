@@ -337,13 +337,15 @@ const COMPRESSION_LEVELS = {
   // Solo para casos excepcionales (adjuntar a un correo con límite, enviar con
   // mala señal): 480p, 10 cuadros por segundo y audio mono de baja calidad.
   extrema: { crf: 32, maxHeight: 480, audioBitrate: '32k', preset: 'superfast', fps: 10, mono: true },
+  // Para "Cortar": mantiene la resolución y casi la calidad original.
+  corte: { crf: 19, maxHeight: 0, audioBitrate: '128k', preset: 'veryfast' },
 };
 
 // Calidad del mosaico unido (CRF de H.264). Acepta también los niveles de
 // compresión para "comprimir y unir" en un solo paso.
 const MOSAIC_QUALITY_CRF = { alta: 20, normal: 23, comprimida: 27, equilibrada: 25, maxima: 28, extrema: 32 };
 
-function enqueueCompressJob(fileId, level, expectedDuration) {
+function enqueueCompressJob(fileId, level, expectedDuration, start = 0, length = 0) {
   const stored = getStoredFile(fileId);
   const settings = COMPRESSION_LEVELS[level];
   const jobId = createJob(stored.originalName);
@@ -353,7 +355,8 @@ function enqueueCompressJob(fileId, level, expectedDuration) {
 
   enqueue(async () => {
     job.status = 'processing';
-    const outputName = `${safeBaseName(stored.originalName)}-comprimido-${level}-${jobId.slice(0, 6)}.mp4`;
+    const label = level === 'corte' ? 'corte' : `comprimido-${level}`;
+    const outputName = `${safeBaseName(stored.originalName)}-${label}-${jobId.slice(0, 6)}.mp4`;
     const outputPath = path.join(OUTPUT_DIR, outputName);
     const filters = [];
     // Solo achica videos más grandes que el límite; nunca agranda.
@@ -361,7 +364,11 @@ function enqueueCompressJob(fileId, level, expectedDuration) {
     if (settings.maxHeight) filters.push(`scale=-2:'min(ih,${settings.maxHeight})'`);
     filters.push('format=yuv420p');
 
-    const command = ffmpeg(stored.path)
+    const command = ffmpeg(stored.path);
+    // Recorte: "-ss" antes de la entrada busca rápido y, al recodificar, exacto.
+    if (start > 0) command.inputOptions('-ss', String(round3(start)));
+    if (length > 0) command.outputOptions('-t', String(round3(length)));
+    command
       .outputOptions(
         '-map', '0:v:0',
         '-map', '0:a?',
@@ -386,7 +393,7 @@ function enqueueCompressJob(fileId, level, expectedDuration) {
         (p) => {
           job.progress = p;
         },
-        expectedDuration
+        length || expectedDuration
       );
       finishJob(job, outputName);
       job.outputBytes = fs.statSync(outputPath).size;
@@ -411,22 +418,45 @@ function even(n) {
 //  - retraso < 0: se recorta el inicio de esa cámara.
 // audioCameras: índices de las cámaras cuyo audio se incluye; cada una va en
 // su propia pista (nunca se mezclan), y el reproductor permite elegir cuál oír.
-function buildMosaicPlan({ items, cols, rows, width, fps, audioCameras = [] }) {
+// Recorte (start/end, en segundos de la línea de tiempo común): el video
+// final va desde "start" hasta "end" y cada cámara se corta en el momento
+// equivalente según su retraso, así todas quedan sincronizadas. Una cámara
+// sin imagen en ese tramo aparece en negro; si termina antes, se pone negra
+// en vez de congelarse en su último cuadro.
+function cameraWindow(item, start) {
+  const local = start - item.delay; // segundo de la cámara al inicio del video final
+  return { seek: Math.max(0, local), pad: Math.max(0, -local) };
+}
+
+const round3 = (n) => Math.round(n * 1000) / 1000;
+
+function buildMosaicPlan({ items, cols, rows, width, fps, audioCameras = [], start = 0, length = 0 }) {
   const cellW = even(width / cols);
   const cellH = even((cellW * 9) / 16);
   const inputs = [];
   const filters = [];
+  const black = new Set();
 
   items.forEach((item, i) => {
-    const inputOptions = [];
-    if (item.delay < 0) inputOptions.push('-ss', String(-item.delay));
-    inputs.push({ path: item.path, options: inputOptions });
+    const { seek, pad } = cameraWindow(item, start);
+    const outOfRange = length > 0 && item.duration > 0 && (seek >= item.duration || pad >= length);
+    if (outOfRange) {
+      // No hay imagen de esta cámara en el tramo elegido: celda negra.
+      black.add(i);
+      filters.push(`color=c=black:s=${cellW}x${cellH}:r=${fps}:d=${round3(length)},format=yuv420p,setsar=1[v${i}]`);
+      return;
+    }
+    const inputIndex = inputs.length;
+    inputs.push({ path: item.path, options: seek > 0 ? ['-ss', String(round3(seek))] : [] });
 
     let chain =
-      `[${i}:v:0]setpts=PTS-STARTPTS,fps=${fps},` +
+      `[${inputIndex}:v:0]setpts=PTS-STARTPTS,fps=${fps},` +
       `scale=${cellW}:${cellH}:force_original_aspect_ratio=decrease,` +
       `pad=${cellW}:${cellH}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,format=yuv420p`;
-    if (item.delay > 0) chain += `,tpad=start_duration=${item.delay}:color=black`;
+    const tpad = [];
+    if (pad > 0) tpad.push(`start_duration=${round3(pad)}`);
+    if (length > 0) tpad.push('stop_mode=add', `stop_duration=${round3(length)}`);
+    if (tpad.length) chain += `,tpad=${tpad.join(':')}:color=black`;
     filters.push(`${chain}[v${i}]`);
   });
 
@@ -443,13 +473,13 @@ function buildMosaicPlan({ items, cols, rows, width, fps, audioCameras = [] }) {
   // El audio de cada cámara elegida se toma de una entrada extra del mismo
   // archivo, desplazada igual que su video para que quede sincronizado.
   const audioInputs = audioCameras
-    .filter((i) => i >= 0 && i < items.length)
+    .filter((i) => i >= 0 && i < items.length && !black.has(i))
     .map((i) => {
-      const item = items[i];
+      const { seek, pad } = cameraWindow(items[i], start);
       const options = [];
-      if (item.delay < 0) options.push('-ss', String(-item.delay));
-      if (item.delay > 0) options.push('-itsoffset', String(item.delay));
-      return { path: item.path, options, camera: i };
+      if (seek > 0) options.push('-ss', String(round3(seek)));
+      if (pad > 0) options.push('-itsoffset', String(round3(pad)));
+      return { path: items[i].path, options, camera: i };
     });
 
   // El ancho/alto final cubre la grilla completa aunque falten cámaras.
@@ -722,6 +752,7 @@ function enqueueMosaicJob(options) {
       '-threads', '0',
       '-movflags', '+faststart',
     ];
+    if (options.length > 0) outputOptions.push('-t', String(round3(options.length)));
     if (plan.audioInputs.length) {
       plan.audioInputs.forEach((input, k) => {
         outputOptions.push(
@@ -747,7 +778,7 @@ function enqueueMosaicJob(options) {
         (p) => {
           job.progress = p;
         },
-        options.expectedDuration
+        options.length || options.expectedDuration
       );
       finishJob(job, outputName);
       job.audioTracks = plan.audioInputs.map((input) => input.camera + 1);
@@ -1008,7 +1039,9 @@ app.post('/api/compress', (req, res) => {
     return res.status(400).json({ error: 'Nivel de compresión inválido.' });
   }
   const expectedDuration = Math.max(0, Number(req.body.expectedDuration) || 0);
-  res.json({ jobId: enqueueCompressJob(fileId, level, expectedDuration) });
+  const start = Math.max(0, Number(req.body.start) || 0);
+  const length = Math.max(0, Number(req.body.length) || 0);
+  res.json({ jobId: enqueueCompressJob(fileId, level, expectedDuration, start, length) });
 });
 
 app.post('/api/preview', (req, res) => {
@@ -1039,7 +1072,11 @@ app.post('/api/mosaic', (req, res) => {
       });
     }
     const delay = Number(raw.delay) || 0;
-    items.push({ path: stored.path, delay: Math.max(-86400, Math.min(86400, Math.round(delay * 1000) / 1000)) });
+    items.push({
+      path: stored.path,
+      delay: Math.max(-86400 * 7, Math.min(86400 * 7, round3(delay))),
+      duration: Math.max(0, Number(raw.duration) || 0),
+    });
   }
 
   const cols = Math.trunc(Number(body.cols));
@@ -1056,8 +1093,13 @@ app.post('/api/mosaic', (req, res) => {
   }
   const expectedDuration = Math.max(0, Number(body.expectedDuration) || 0);
 
+  // Recorte opcional (segundos de la línea de tiempo común).
+  const start = Math.max(0, Number(body.start) || 0);
+  const end = Number(body.end) || 0;
+  const length = end > start ? end - start : expectedDuration > 0 ? Math.max(0, expectedDuration - start) : 0;
+
   const quality = MOSAIC_QUALITY_CRF[body.quality] ? body.quality : 'normal';
-  const jobId = enqueueMosaicJob({ items, cols, rows, width, fps, audioIndex, expectedDuration, quality });
+  const jobId = enqueueMosaicJob({ items, cols, rows, width, fps, audioIndex, expectedDuration, quality, start, length });
   res.json({ jobId });
 });
 
