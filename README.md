@@ -13,6 +13,13 @@ Aplicación web para ver hasta **8 cámaras sincronizadas** a la vez (como un DV
 
 El plan gratis "duerme" tras 15 minutos sin uso (la primera visita tarda ~1 minuto en despertar) y tiene poca CPU, así que unir muchos videos largos es lento; el plan *Starter* es más rápido.
 
+### Videos grandes y reinicios del servidor
+
+- Las subidas son **reanudables**: el progreso de cada subida se guarda en disco y el navegador reintenta solo ante cortes de red o reinicios del servidor, continuando desde lo ya recibido. Si el servidor perdió la subida o un video (disco borrado), lo vuelve a subir automáticamente.
+- Tamaño máximo por video: 50 GB (variable `MAX_UPLOAD_GB`). Antes de empezar se revisa el espacio libre en disco.
+- Los archivos se borran tras 12 horas sin uso (variable `FILE_TTL_HOURS`).
+- **Recomendado en Railway/Render**: agregar un disco persistente (Railway: *Volume* montado en `/data`; Render: *Disk*) y la variable `DATA_DIR=/data`. Sin él, cada vez que se publica una versión nueva el disco del contenedor se vacía y los videos se vuelven a subir solos desde el navegador.
+
 ### Alternativa: Railway
 
 En [railway.com](https://railway.com) → **New Project → Deploy from GitHub repo** → `edualexis10/zonas-pagas-red` (usa `railway.json`). Luego en el servicio: **Settings → Networking → Generate Domain** para obtener el enlace público. `APP_PASSWORD` se agrega en **Variables**.

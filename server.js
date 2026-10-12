@@ -13,14 +13,20 @@ const informe = require('./informe');
 
 ffmpeg.setFfmpegPath(ffmpegPath);
 
-const UPLOAD_DIR = path.join(__dirname, 'uploads');
-const OUTPUT_DIR = path.join(__dirname, 'converted');
+// DATA_DIR permite guardar los videos en un disco persistente (p. ej. un
+// "Volume" de Railway montado en /data) para que sobrevivan a reinicios.
+const DATA_DIR = process.env.DATA_DIR || __dirname;
+const UPLOAD_DIR = path.join(DATA_DIR, 'uploads');
+const OUTPUT_DIR = path.join(DATA_DIR, 'converted');
 [UPLOAD_DIR, OUTPUT_DIR].forEach((dir) => {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 });
 
 const ALLOWED_FORMATS = ['mp4', 'avi', 'mov', 'mkv', 'webm', 'gif'];
-const MAX_FILE_SIZE = 2 * 1024 * 1024 * 1024; // 2 GB por video
+// Tamaño máximo por video (ajustable con MAX_UPLOAD_GB). Lo que de verdad
+// limita es el espacio libre en disco, que se revisa al iniciar cada subida.
+const MAX_FILE_SIZE = (Number(process.env.MAX_UPLOAD_GB) || 50) * 1024 ** 3;
+const MAX_FILE_LABEL = `${Math.round(MAX_FILE_SIZE / 1024 ** 3)} GB`;
 
 // Varias conversiones a la vez, pero acotadas a los núcleos disponibles
 // para no saturar el servidor cuando llegan muchos videos juntos.
@@ -219,8 +225,47 @@ const AUDIO_ALL = -2; // audioIndex especial: cada cámara en su propia pista
 // vistas previas reproducibles y luego unirlos en un mosaico sin resubirlos.
 const storedFiles = new Map(); // fileId -> { path, originalName }
 
+function isValidId(id) {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(String(id));
+}
+
+const partPath = (id) => path.join(UPLOAD_DIR, `${id}.part`);
+const metaPath = (id) => path.join(UPLOAD_DIR, `${id}.json`);
+
+function readMeta(id) {
+  if (!isValidId(id)) return null;
+  try {
+    return JSON.parse(fs.readFileSync(metaPath(id), 'utf8'));
+  } catch {
+    return null;
+  }
+}
+
+function writeMeta(id, meta) {
+  const tmp = `${metaPath(id)}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify(meta));
+  fs.renameSync(tmp, metaPath(id));
+}
+
+// Registra un video completo. Se guarda también en disco (.json) para que
+// siga disponible si el servidor se reinicia.
+function registerStoredFile(fileId, originalName) {
+  const stored = { path: partPath(fileId), originalName };
+  storedFiles.set(fileId, stored);
+  const meta = readMeta(fileId) || {};
+  writeMeta(fileId, { ...meta, fileName: originalName, purpose: 'store', done: true });
+  return stored;
+}
+
 function getStoredFile(fileId) {
-  const stored = storedFiles.get(String(fileId));
+  let stored = storedFiles.get(String(fileId));
+  if (!stored) {
+    const meta = readMeta(fileId);
+    if (meta && meta.done && meta.purpose === 'store') {
+      stored = { path: partPath(fileId), originalName: meta.fileName };
+      storedFiles.set(String(fileId), stored);
+    }
+  }
   if (!stored || !fs.existsSync(stored.path)) return null;
   return stored;
 }
@@ -577,7 +622,7 @@ function enqueueImportJob(url) {
   enqueue(async () => {
     job.status = 'processing';
     const fileId = crypto.randomUUID();
-    const tempPath = path.join(UPLOAD_DIR, `${fileId}.part`);
+    const tempPath = partPath(fileId);
 
     try {
       let response = await fetchVideo(url);
@@ -598,19 +643,19 @@ function enqueueImportJob(url) {
       }
 
       const total = Number(response.headers.get('content-length')) || 0;
-      if (total > MAX_FILE_SIZE) throw new Error('el video supera el tamaño máximo permitido (2 GB)');
+      if (total > MAX_FILE_SIZE) throw new Error(`el video supera el tamaño máximo permitido (${MAX_FILE_LABEL})`);
       job.originalName = fileNameFromResponse(response, response.url || url);
 
       const body = Readable.fromWeb(response.body);
       body.on('data', (chunk) => {
         job.bytes += chunk.length;
-        if (job.bytes > MAX_FILE_SIZE) body.destroy(new Error('el video supera el tamaño máximo permitido (2 GB)'));
+        if (job.bytes > MAX_FILE_SIZE) body.destroy(new Error(`el video supera el tamaño máximo permitido (${MAX_FILE_LABEL})`));
         if (total) job.progress = Math.min(99, Math.round((job.bytes / total) * 100));
       });
       await pipeline(body, fs.createWriteStream(tempPath));
       if (job.bytes === 0) throw new Error('el enlace no devolvió ningún dato');
 
-      storedFiles.set(fileId, { path: tempPath, originalName: job.originalName });
+      registerStoredFile(fileId, job.originalName);
       job.fileId = fileId;
       job.status = 'done';
       job.progress = 100;
@@ -717,11 +762,58 @@ function enqueueMosaicJob(options) {
   return jobId;
 }
 
-// Subida en fragmentos: cada video se envía en pedazos pequeños (unos pocos
-// MB) en vez de una sola solicitud gigante. Esto evita el límite de tamaño
-// de los proxies (como el de Codespaces/nginx) sin importar qué tan grande
-// sea el video, y permite mostrar progreso de subida en tiempo real.
-const uploadSessions = new Map(); // uploadId -> { stream, tempPath, fileName, format, purpose, bytesReceived, lastActivity }
+// Subida en fragmentos: cada video se envía en pedazos de pocos MB en vez de
+// una sola solicitud gigante (evita límites de proxies y permite mostrar el
+// progreso). El estado de cada subida se guarda en disco (uploads/<id>.json)
+// y cada fragmento se escribe en su posición exacta, así que:
+//  - si se corta la conexión o el servidor se reinicia, el navegador consulta
+//    qué partes ya llegaron y continúa desde ahí, sin empezar de nuevo;
+//  - los fragmentos pueden llegar en paralelo y en cualquier orden.
+
+// Junta rangos [inicio, fin) recibidos, fusionando los que se tocan.
+function addRange(ranges, start, end) {
+  const all = [...ranges, [start, end]].sort((a, b) => a[0] - b[0]);
+  const merged = [];
+  for (const [a, b] of all) {
+    const last = merged[merged.length - 1];
+    if (last && a <= last[1]) last[1] = Math.max(last[1], b);
+    else merged.push([a, b]);
+  }
+  return merged;
+}
+
+const receivedBytes = (ranges) => ranges.reduce((sum, [a, b]) => sum + (b - a), 0);
+const isComplete = (meta) => meta.size > 0 && meta.ranges.length === 1 && meta.ranges[0][0] === 0 && meta.ranges[0][1] >= meta.size;
+
+// Subidas en curso (caché en memoria del .json en disco).
+const uploadSessions = new Map(); // uploadId -> meta
+
+function getUploadSession(id) {
+  if (!isValidId(id)) return null;
+  let meta = uploadSessions.get(id);
+  if (!meta) {
+    meta = readMeta(id);
+    if (!meta || !fs.existsSync(partPath(id))) return null;
+    uploadSessions.set(id, meta);
+  }
+  return meta;
+}
+
+// Termina la subida: la deja como video guardado o lanza la conversión.
+function finalizeUpload(id, meta) {
+  if (meta.purpose === 'store') {
+    registerStoredFile(id, meta.fileName);
+    uploadSessions.delete(id);
+    return { done: true, fileId: id, fileName: meta.fileName };
+  }
+  if (!meta.jobId) {
+    meta.jobId = enqueueConversionJob(partPath(id), meta.fileName, meta.format);
+    meta.done = true;
+    writeMeta(id, meta);
+  }
+  uploadSessions.delete(id);
+  return { done: true, jobId: meta.jobId, fileName: meta.fileName };
+}
 
 const chunkUpload = multer({
   storage: multer.memoryStorage(),
@@ -767,65 +859,98 @@ app.post('/api/upload/init', (req, res) => {
     return res.status(400).json({ error: `Formato no soportado: ${format}` });
   }
 
-  const uploadId = crypto.randomUUID();
-  const tempPath = path.join(UPLOAD_DIR, `${uploadId}.part`);
-  const stream = fs.createWriteStream(tempPath);
+  const size = Math.max(0, Math.trunc(Number(req.body.fileSize)) || 0);
+  if (size > MAX_FILE_SIZE) {
+    return res.status(413).json({ error: `El video supera el tamaño máximo permitido (${MAX_FILE_LABEL}).` });
+  }
+  // Avisa de entrada si no hay espacio, en vez de fallar a mitad de camino.
+  try {
+    const { bavail, bsize } = fs.statfsSync(UPLOAD_DIR);
+    if (size && bavail * bsize < size * 1.05) {
+      return res.status(507).json({
+        error: `No hay espacio suficiente en el servidor (${(size / 1024 ** 3).toFixed(1)} GB necesarios, ${((bavail * bsize) / 1024 ** 3).toFixed(1)} GB libres).`,
+      });
+    }
+  } catch {
+    // statfs no disponible: se sigue sin la verificación
+  }
 
-  uploadSessions.set(uploadId, {
-    stream,
-    tempPath,
-    fileName,
-    format,
-    purpose,
-    bytesReceived: 0,
-    lastActivity: Date.now(),
-  });
+  const uploadId = crypto.randomUUID();
+  fs.closeSync(fs.openSync(partPath(uploadId), 'w'));
+  const meta = { fileName, format, purpose, size, ranges: [], done: false };
+  writeMeta(uploadId, meta);
+  uploadSessions.set(uploadId, meta);
 
   res.json({ uploadId });
 });
 
-app.post('/api/upload/chunk', chunkUpload.single('chunk'), (req, res) => {
+// Qué partes de una subida ya llegaron (para reanudarla).
+app.get('/api/upload/:id/status', (req, res) => {
+  const meta = getUploadSession(req.params.id);
+  if (!meta) {
+    const done = getStoredFile(req.params.id);
+    if (done) return res.json({ done: true, fileId: req.params.id });
+    return res.status(404).json({ error: 'Sesión de subida no encontrada o expirada.' });
+  }
+  res.json({ done: false, size: meta.size, ranges: meta.ranges, received: receivedBytes(meta.ranges) });
+});
+
+// El navegador avisa que envió todo; el servidor confirma que está completo.
+app.post('/api/upload/complete', (req, res) => {
+  const id = req.body && req.body.uploadId;
+  const meta = getUploadSession(id);
+  if (!meta) {
+    if (getStoredFile(id)) return res.json({ done: true, fileId: id });
+    return res.status(404).json({ error: 'Sesión de subida no encontrada o expirada.' });
+  }
+  if (!isComplete(meta)) {
+    return res.status(409).json({ error: 'Faltan partes del video.', ranges: meta.ranges, size: meta.size });
+  }
+  res.json(finalizeUpload(id, meta));
+});
+
+app.post('/api/upload/chunk', chunkUpload.single('chunk'), async (req, res) => {
   const { uploadId } = req.body;
   const isLast = req.body.isLast === 'true';
-  const session = uploadSessions.get(uploadId);
+  const meta = getUploadSession(uploadId);
 
-  if (!session) {
+  if (!meta) {
     return res.status(404).json({ error: 'Sesión de subida no encontrada o expirada.' });
   }
   if (!req.file || req.file.buffer.length === 0) {
     return res.status(400).json({ error: 'Fragmento vacío.' });
   }
 
-  session.bytesReceived += req.file.buffer.length;
-  session.lastActivity = Date.now();
-
-  if (session.bytesReceived > MAX_FILE_SIZE) {
-    session.stream.destroy();
-    fs.unlink(session.tempPath, () => {});
-    uploadSessions.delete(uploadId);
-    return res.status(413).json({ error: 'El video supera el tamaño máximo permitido (2 GB).' });
+  // Sin "offset" (cliente antiguo, secuencial) se escribe a continuación.
+  const length = req.file.buffer.length;
+  const offset =
+    req.body.offset !== undefined ? Math.trunc(Number(req.body.offset)) : meta.ranges.length ? meta.ranges[meta.ranges.length - 1][1] : 0;
+  if (!(offset >= 0) || offset + length > MAX_FILE_SIZE || (meta.size && offset + length > meta.size)) {
+    return res.status(413).json({ error: `El video supera el tamaño máximo permitido (${MAX_FILE_LABEL}).` });
   }
 
-  session.stream.write(req.file.buffer, (err) => {
-    if (err) {
-      uploadSessions.delete(uploadId);
-      return res.status(500).json({ error: 'Error al guardar el fragmento.' });
-    }
-
-    if (!isLast) {
-      return res.json({ done: false, bytesReceived: session.bytesReceived });
-    }
-
-    session.stream.end(() => {
-      uploadSessions.delete(uploadId);
-      if (session.purpose === 'store') {
-        storedFiles.set(uploadId, { path: session.tempPath, originalName: session.fileName });
-        return res.json({ done: true, fileId: uploadId, fileName: session.fileName });
-      }
-      const jobId = enqueueConversionJob(session.tempPath, session.fileName, session.format);
-      res.json({ done: true, jobId, fileName: session.fileName });
+  let handle;
+  try {
+    handle = await fs.promises.open(partPath(uploadId), 'r+');
+    await handle.write(req.file.buffer, 0, length, offset);
+  } catch (err) {
+    const noSpace = err && err.code === 'ENOSPC';
+    return res.status(noSpace ? 507 : 500).json({
+      error: noSpace ? 'El servidor se quedó sin espacio en disco.' : 'Error al guardar el fragmento.',
     });
-  });
+  } finally {
+    if (handle) await handle.close();
+  }
+
+  meta.ranges = addRange(meta.ranges, offset, offset + length);
+  writeMeta(uploadId, meta);
+
+  // Cliente antiguo: el último fragmento cierra la subida.
+  if (isLast && (!meta.size || isComplete(meta))) {
+    if (!meta.size) meta.size = meta.ranges[meta.ranges.length - 1][1];
+    return res.json(finalizeUpload(uploadId, meta));
+  }
+  res.json({ done: false, received: receivedBytes(meta.ranges) });
 });
 
 app.get('/api/jobs/:id', (req, res) => {
@@ -866,11 +991,18 @@ app.post('/api/import', (req, res) => {
   res.json({ jobId: enqueueImportJob(url) });
 });
 
+// Qué videos ya no están en el servidor (p. ej. tras un reinicio sin disco
+// persistente), para que el navegador los vuelva a subir antes de procesar.
+app.post('/api/files/check', (req, res) => {
+  const ids = Array.isArray(req.body && req.body.fileIds) ? req.body.fileIds.slice(0, 50) : [];
+  res.json({ missing: ids.filter((id) => !getStoredFile(id)) });
+});
+
 app.post('/api/compress', (req, res) => {
   const fileId = req.body && req.body.fileId;
   const level = req.body && req.body.level;
   if (!getStoredFile(fileId)) {
-    return res.status(404).json({ error: 'Video no encontrado. Vuelve a subirlo.' });
+    return res.status(404).json({ error: 'Video no encontrado. Vuelve a subirlo.', code: 'FILE_MISSING', fileId });
   }
   if (!COMPRESSION_LEVELS[level]) {
     return res.status(400).json({ error: 'Nivel de compresión inválido.' });
@@ -882,7 +1014,7 @@ app.post('/api/compress', (req, res) => {
 app.post('/api/preview', (req, res) => {
   const fileId = req.body && req.body.fileId;
   if (!getStoredFile(fileId)) {
-    return res.status(404).json({ error: 'Video no encontrado. Vuelve a subirlo.' });
+    return res.status(404).json({ error: 'Video no encontrado. Vuelve a subirlo.', code: 'FILE_MISSING', fileId });
   }
   const format = req.body.format === 'webm' ? 'webm' : 'mp4';
   res.json({ jobId: enqueuePreviewJob(fileId, format) });
@@ -900,7 +1032,11 @@ app.post('/api/mosaic', (req, res) => {
   for (const raw of rawItems) {
     const stored = getStoredFile(raw && raw.fileId);
     if (!stored) {
-      return res.status(404).json({ error: 'Uno de los videos ya no está en el servidor. Vuelve a subirlo.' });
+      return res.status(404).json({
+        error: 'Uno de los videos ya no está en el servidor. Vuelve a subirlo.',
+        code: 'FILE_MISSING',
+        fileId: raw && raw.fileId,
+      });
     }
     const delay = Number(raw.delay) || 0;
     items.push({ path: stored.path, delay: Math.max(-86400, Math.min(86400, Math.round(delay * 1000) / 1000)) });
@@ -953,17 +1089,13 @@ app.use((err, req, res, next) => {
   res.status(400).json({ error: err.message });
 });
 
-// Limpia archivos de más de 3 horas para no llenar el disco
-// cuando se procesan muchos videos seguidos, y cierra sesiones de subida
-// abandonadas (el usuario cerró la pestaña a mitad de una subida).
-const MAX_AGE_MS = 3 * 60 * 60 * 1000;
+// Limpia archivos sin uso hace más de FILE_TTL_HOURS (12 h por defecto) para
+// no llenar el disco. Una subida en curso no se borra: cada fragmento que
+// llega actualiza la fecha de su archivo.
+const MAX_AGE_MS = (Number(process.env.FILE_TTL_HOURS) || 12) * 60 * 60 * 1000;
 setInterval(() => {
-  for (const [uploadId, session] of uploadSessions) {
-    if (Date.now() - session.lastActivity > MAX_AGE_MS) {
-      session.stream.destroy();
-      fs.unlink(session.tempPath, () => {});
-      uploadSessions.delete(uploadId);
-    }
+  for (const id of uploadSessions.keys()) {
+    if (!fs.existsSync(partPath(id))) uploadSessions.delete(id);
   }
 
   for (const [fileId, stored] of storedFiles) {

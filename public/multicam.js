@@ -67,9 +67,34 @@ async function readJson(response) {
   if (!response.ok) {
     const err = new Error(data.error || `HTTP ${response.status}`);
     err.status = response.status;
+    err.data = data;
     throw err;
   }
   return data;
+}
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// Errores pasajeros: sin conexión, servidor reiniciándose, proxy caído…
+// (507 = sin espacio en disco: reintentar no sirve).
+function isTransient(err) {
+  return !err.status || err.status === 408 || err.status === 429 || (err.status >= 500 && err.status !== 507);
+}
+
+// Reintenta mientras el error sea pasajero, esperando cada vez más (hasta
+// 30 s entre intentos, ~20 minutos en total) para aguantar cortes de red o
+// reinicios del servidor sin perder el trabajo.
+async function withRetry(fn, onWait) {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      if (!isTransient(err) || attempt >= 45) throw err;
+      const wait = Math.min(30000, 2000 * 2 ** Math.min(attempt, 4));
+      if (onWait) onWait(err, wait);
+      await sleep(wait);
+    }
+  }
 }
 
 function postJson(url, body) {
@@ -91,36 +116,103 @@ function triggerDownload(url, fileName) {
 // Subida en fragmentos (igual que el conversor: evita límites del proxy)
 // ---------------------------------------------------------------------------
 
-async function uploadStored(file, onProgress) {
-  const { uploadId } = await postJson('/api/upload/init', { fileName: file.name, purpose: 'store' });
-  let sent = 0;
-  let fileId = null;
+// Partes del archivo que el servidor todavía no tiene, en trozos de CHUNK_SIZE.
+function missingChunks(size, ranges) {
+  const chunks = [];
+  let pos = 0;
+  const gaps = [];
+  for (const [a, b] of ranges) {
+    if (a > pos) gaps.push([pos, a]);
+    pos = Math.max(pos, b);
+  }
+  if (pos < size) gaps.push([pos, size]);
+  for (const [a, b] of gaps) {
+    for (let o = a; o < b; o += CHUNK_SIZE) chunks.push([o, Math.min(o + CHUNK_SIZE, b)]);
+  }
+  return chunks;
+}
 
-  async function sendRange(start, end, isLast) {
-    const size = end - start;
+// Sube un video de cualquier tamaño. Envía 3 trozos a la vez; si se corta la
+// conexión o el servidor se reinicia, reintenta solo y continúa desde lo que
+// el servidor ya recibió. Si el servidor perdió la subida (p. ej. se borró su
+// disco al reiniciarse), la empieza de nuevo automáticamente.
+async function uploadStored(file, onProgress) {
+  if (file.size === 0) throw new Error('El archivo está vacío.');
+  for (let attempt = 0; attempt < 3; attempt++) {
+    const { uploadId } = await withRetry(() =>
+      postJson('/api/upload/init', { fileName: file.name, purpose: 'store', fileSize: file.size })
+    );
     try {
-      const formData = new FormData();
-      formData.append('uploadId', uploadId);
-      formData.append('isLast', String(isLast));
-      formData.append('chunk', file.slice(start, end));
-      const result = await fetch('/api/upload/chunk', { method: 'POST', body: formData }).then(readJson);
-      sent += size;
-      onProgress(Math.min(99, Math.round((sent / file.size) * 100)));
-      if (result.done) fileId = result.fileId;
+      return await uploadParts(file, uploadId, onProgress);
     } catch (err) {
-      if (size <= MIN_CHUNK_SIZE || (err.status && err.status < 500 && err.status !== 413)) throw err;
-      const mid = start + Math.floor(size / 2);
-      await sendRange(start, mid, false);
-      await sendRange(mid, end, isLast);
+      if (err.status === 404) continue;
+      throw err;
     }
   }
+  throw new Error('No se pudo completar la subida después de varios intentos.');
+}
 
-  if (file.size === 0) throw new Error('El archivo está vacío.');
-  for (let offset = 0; offset < file.size; offset += CHUNK_SIZE) {
-    const end = Math.min(offset + CHUNK_SIZE, file.size);
-    await sendRange(offset, end, end >= file.size);
+async function uploadParts(file, uploadId, onProgress) {
+  let ranges = [];
+  for (;;) {
+    const pending = missingChunks(file.size, ranges);
+    let confirmed = file.size - pending.reduce((sum, [a, b]) => sum + (b - a), 0);
+    const report = (note) => {
+      const pct = Math.min(99, Math.floor((confirmed / file.size) * 100));
+      onProgress(pct, confirmed, note);
+    };
+    report();
+
+    // Envía un trozo; si un proxy lo rechaza por grande (413 sin respuesta del
+    // servidor), lo parte en dos.
+    const sendChunk = async (a, b) => {
+      try {
+        await withRetry(
+          () => {
+            const formData = new FormData();
+            formData.append('uploadId', uploadId);
+            formData.append('offset', String(a));
+            formData.append('chunk', file.slice(a, b));
+            return fetch('/api/upload/chunk', { method: 'POST', body: formData }).then(readJson);
+          },
+          (err, wait) => report(`sin conexión con el servidor, reintentando en ${Math.round(wait / 1000)} s…`)
+        );
+        confirmed += b - a;
+        report();
+      } catch (err) {
+        if (err.status === 413 && !err.data && b - a > MIN_CHUNK_SIZE) {
+          const mid = a + Math.floor((b - a) / 2);
+          await sendChunk(a, mid);
+          await sendChunk(mid, b);
+          return;
+        }
+        throw err;
+      }
+    };
+
+    const queue = pending.slice();
+    const worker = async () => {
+      while (queue.length) {
+        const [a, b] = queue.shift();
+        await sendChunk(a, b);
+      }
+    };
+    await Promise.all([worker(), worker(), worker()]);
+
+    try {
+      const result = await withRetry(() => postJson('/api/upload/complete', { uploadId }));
+      onProgress(100, file.size);
+      return result.fileId;
+    } catch (err) {
+      // Faltan partes (p. ej. el servidor se reinició y perdió las últimas):
+      // se envían solo esas.
+      if (err.status === 409 && err.data && err.data.ranges) {
+        ranges = err.data.ranges;
+        continue;
+      }
+      throw err;
+    }
   }
-  return fileId;
 }
 
 // Sube el original una sola vez y reutiliza el id (vista previa + mosaico).
@@ -137,10 +229,12 @@ function ensureUploaded(slot, onProgress) {
 
 // El servidor descarga el video del enlace (Drive, Dropbox, directo).
 async function importUrl(slot, onProgress) {
-  const { jobId } = await postJson('/api/import', { url: slot.sourceUrl });
-  const job = await waitForJob(jobId, (j) => {
-    if (j.status === 'processing') onProgress(j.progress, j.bytes);
-  });
+  const job = await runServerJob(
+    () => postJson('/api/import', { url: slot.sourceUrl }),
+    (j) => {
+      if (j.status === 'processing') onProgress(j.progress, j.bytes);
+    }
+  );
   if (!slot.keepName && job.originalName && job.originalName !== slot.name) {
     slot.name = job.originalName;
     if (slot.labelEl) slot.labelEl.lastChild.textContent = slot.name;
@@ -148,26 +242,60 @@ async function importUrl(slot, onProgress) {
   return job.fileId;
 }
 
-function waitForJob(jobId, onProgress) {
-  return new Promise((resolve, reject) => {
-    const timer = setInterval(async () => {
-      try {
-        const job = await fetch(`/api/jobs/${jobId}`).then(readJson);
-        if (job.status === 'done') {
-          clearInterval(timer);
-          resolve(job);
-        } else if (job.status === 'error') {
-          clearInterval(timer);
-          reject(new Error(job.error || 'Error al procesar.'));
-        } else {
-          onProgress(job);
-        }
-      } catch (err) {
-        clearInterval(timer);
-        reject(err);
+// Consulta el avance de un trabajo del servidor. Si se pierde la conexión
+// sigue intentando (hasta ~10 minutos seguidos); si el servidor se reinició y
+// ya no conoce el trabajo, avisa con code = 'JOB_LOST' para relanzarlo.
+async function waitForJob(jobId, onProgress) {
+  let failingSince = null;
+  for (;;) {
+    await sleep(failingSince ? 3000 : 800);
+    let job;
+    try {
+      job = await fetch(`/api/jobs/${jobId}`).then(readJson);
+      failingSince = null;
+    } catch (err) {
+      if (err.status === 404) {
+        const lost = new Error('El servidor se reinició y perdió el trabajo.');
+        lost.code = 'JOB_LOST';
+        throw lost;
       }
-    }, 800);
-  });
+      if (!isTransient(err)) throw err;
+      failingSince = failingSince || Date.now();
+      if (Date.now() - failingSince > 10 * 60 * 1000) throw new Error('Se perdió la conexión con el servidor.');
+      continue;
+    }
+    if (job.status === 'done') return job;
+    if (job.status === 'error') throw new Error(job.error || 'Error al procesar.');
+    onProgress(job);
+  }
+}
+
+// Lanza un trabajo en el servidor y espera el resultado. Si el servidor se
+// reinicia a mitad, lo vuelve a lanzar (hasta 2 veces).
+async function runServerJob(start, onProgress) {
+  for (let attempt = 0; ; attempt++) {
+    const { jobId } = await withRetry(start);
+    try {
+      return await waitForJob(jobId, onProgress);
+    } catch (err) {
+      if (err.code !== 'JOB_LOST' || attempt >= 2) throw err;
+    }
+  }
+}
+
+// Ejecuta fn(fileId) con el video de la cámara ya en el servidor. Si el
+// servidor dice que ese video ya no existe (se reinició o se borró), lo vuelve
+// a subir y repite.
+async function withFile(slot, onProgress, fn) {
+  for (let attempt = 0; ; attempt++) {
+    const fileId = await ensureUploaded(slot, onProgress);
+    try {
+      return await fn(fileId);
+    } catch (err) {
+      if (attempt >= 1 || !(err.data && err.data.code === 'FILE_MISSING')) throw err;
+      slot.fileIdPromise = null;
+    }
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -406,18 +534,23 @@ async function loadViaServer(slot) {
   try {
     const verb = slot.sourceUrl ? 'Descargando enlace' : 'Subiendo para convertir';
     setSlotStatus(slot, `${verb}…`);
-    const fileId = await ensureUploaded(slot, (pct, bytes) => {
+    const onUpload = (pct, bytes, note) => {
       if (slot.removed) return;
       const detail = pct ? `${pct}%` : bytes ? `${(bytes / 1048576).toFixed(1)} MB` : '';
-      setSlotStatus(slot, `${verb}… ${detail}`);
+      setSlotStatus(slot, `${verb}… ${detail}${note ? ` (${note})` : ''}`);
+    };
+    const job = await withFile(slot, onUpload, (fileId) => {
+      if (slot.removed) return null;
+      setSlotStatus(slot, 'Convirtiendo para reproducir…');
+      return runServerJob(
+        () => postJson('/api/preview', { fileId, format: PREVIEW_FORMAT }),
+        (j) => {
+          if (slot.removed) return;
+          setSlotStatus(slot, j.status === 'queued' ? 'En cola…' : `Convirtiendo para reproducir… ${j.progress}%`);
+        }
+      );
     });
-    if (slot.removed) return;
-    setSlotStatus(slot, 'Convirtiendo para reproducir…');
-    const { jobId } = await postJson('/api/preview', { fileId, format: PREVIEW_FORMAT });
-    const job = await waitForJob(jobId, (j) => {
-      if (slot.removed) return;
-      setSlotStatus(slot, j.status === 'queued' ? 'En cola…' : `Convirtiendo para reproducir… ${j.progress}%`);
-    });
+    if (!job) return;
     if (slot.removed) return;
     slot.video.addEventListener('loadeddata', () => markReady(slot), { once: true });
     slot.video.addEventListener(
@@ -1009,12 +1142,18 @@ function addCompressRow(name) {
 
 async function compressSlot(slot, level, row, autoDownload) {
   try {
-    const fileId = await ensureUploaded(slot, (pct) => row.set(`Subiendo… ${pct || 0}%`, (pct || 0) * 0.3));
-    const { jobId } = await postJson('/api/compress', { fileId, level, expectedDuration: slot.duration || 0 });
-    const job = await waitForJob(jobId, (j) => {
-      if (j.status === 'queued') row.set('En cola…', 30);
-      else row.set(`Comprimiendo… ${j.progress}%`, 30 + j.progress * 0.7);
-    });
+    const job = await withFile(
+      slot,
+      (pct, bytes, note) => row.set(`Subiendo… ${pct || 0}%${note ? ` (${note})` : ''}`, (pct || 0) * 0.3),
+      (fileId) =>
+        runServerJob(
+          () => postJson('/api/compress', { fileId, level, expectedDuration: slot.duration || 0 }),
+          (j) => {
+            if (j.status === 'queued') row.set('En cola…', 30);
+            else row.set(`Comprimiendo… ${j.progress}%`, 30 + j.progress * 0.7);
+          }
+        )
+    );
     const saved = job.inputBytes ? Math.min(99, Math.round((1 - job.outputBytes / job.inputBytes) * 100)) : 0;
     const summary =
       saved > 0
@@ -1088,25 +1227,38 @@ async function merge(opts = {}) {
       setMergeStatus(`Subiendo / descargando videos… ${avg}%`, avg * 0.3);
     };
     report();
-    const fileIds = await Promise.all(
-      current.map((slot, i) =>
-        ensureUploaded(slot, (pct) => {
-          progress[i] = pct;
-          report();
-        }).then((id) => {
-          progress[i] = 100;
-          report();
-          return id;
-        })
-      )
-    );
+    const uploadAll = () =>
+      Promise.all(
+        current.map((slot, i) =>
+          ensureUploaded(slot, (pct) => {
+            progress[i] = pct;
+            report();
+          }).then((id) => {
+            progress[i] = 100;
+            report();
+            return id;
+          })
+        )
+      );
+    let fileIds = await uploadAll();
+    // Si el servidor perdió algún video (se reinició), se vuelve a subir.
+    const reuploadMissing = async () => {
+      const { missing } = await withRetry(() => postJson('/api/files/check', { fileIds }));
+      if (!missing.length) return;
+      current.forEach((slot, i) => {
+        if (missing.includes(fileIds[i])) slot.fileIdPromise = null;
+      });
+      setMergeStatus('Algunos videos se perdieron en el servidor; volviendo a subirlos…', 5);
+      fileIds = await uploadAll();
+    };
+    await reuploadMissing();
 
     const [cols, rows] = mergeLayout();
     // Solo sirve para mostrar el progreso: si falta alguna duración, se omite.
     const expectedDuration = current.every((s) => s.ready && s.duration)
       ? current.reduce((max, s) => Math.max(max, s.delay + s.duration), 0)
       : 0;
-    const { jobId } = await postJson('/api/mosaic', {
+    const mosaicBody = () => ({
       items: current.map((slot, i) => ({ fileId: fileIds[i], delay: slot.delay })),
       cols,
       rows,
@@ -1118,10 +1270,21 @@ async function merge(opts = {}) {
     });
 
     setMergeStatus('Uniendo videos…', 30);
-    const job = await waitForJob(jobId, (j) => {
+    const onMergeProgress = (j) => {
       if (j.status === 'queued') setMergeStatus('En cola…', 30);
       else setMergeStatus(`Uniendo videos… ${j.progress}%`, 30 + j.progress * 0.7);
-    });
+    };
+    let job;
+    for (let attempt = 0; ; attempt++) {
+      try {
+        job = await runServerJob(() => postJson('/api/mosaic', mosaicBody()), onMergeProgress);
+        break;
+      } catch (err) {
+        // El servidor perdió algún video (reinicio): se vuelve a subir y se repite.
+        if (attempt >= 2 || !(err.data && err.data.code === 'FILE_MISSING')) throw err;
+        await reuploadMissing();
+      }
+    }
 
     const tracks = job.audioTracks || [];
     const audioNote =
