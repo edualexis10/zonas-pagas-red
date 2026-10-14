@@ -10,6 +10,9 @@ const PREVIEW_FORMAT = document.createElement('video').canPlayType('video/mp4; c
   ? 'mp4'
   : 'webm';
 const AUDIO_ALL = -2;
+// ¿El navegador reproduce H.265/HEVC? (Chrome/Edge con aceleración, Safari):
+// así el servidor puede entregar el video tal cual, sin recodificarlo.
+const CAN_HEVC = !!document.createElement('video').canPlayType('video/mp4; codecs="hvc1.1.6.L93.B0"');
 const AUTO_LAYOUTS = [[1, 1], [1, 1], [2, 1], [2, 2], [2, 2], [3, 2], [3, 2], [4, 2], [4, 2]];
 
 const $ = (id) => document.getElementById(id);
@@ -532,7 +535,7 @@ function loadSlot(slot) {
   video.src = src;
 }
 
-async function loadViaServer(slot) {
+async function loadViaServer(slot, forceTranscode = false) {
   try {
     const verb = slot.sourceUrl ? 'Descargando enlace' : 'Subiendo para convertir';
     setSlotStatus(slot, `${verb}…`);
@@ -543,9 +546,9 @@ async function loadViaServer(slot) {
     };
     const job = await withFile(slot, onUpload, (fileId) => {
       if (slot.removed) return null;
-      setSlotStatus(slot, 'Convirtiendo para reproducir…');
+      setSlotStatus(slot, 'Preparando para reproducir…');
       return runServerJob(
-        () => postJson('/api/preview', { fileId, format: PREVIEW_FORMAT }),
+        () => postJson('/api/preview', { fileId, format: PREVIEW_FORMAT, canHevc: CAN_HEVC, transcode: forceTranscode }),
         (j) => {
           if (slot.removed) return;
           setSlotStatus(slot, j.status === 'queued' ? 'En cola…' : `Convirtiendo para reproducir… ${j.progress}%`);
@@ -554,12 +557,23 @@ async function loadViaServer(slot) {
     });
     if (!job) return;
     if (slot.removed) return;
-    slot.video.addEventListener('loadeddata', () => markReady(slot), { once: true });
+    // Si el video reempaquetado (sin recodificar) no se puede ver en este
+    // navegador, se pide la versión recodificada.
+    const retry = () => {
+      if (job.remuxed && !forceTranscode) {
+        slot.video.removeAttribute('src');
+        slot.video.load();
+        loadViaServer(slot, true);
+      } else {
+        setSlotStatus(slot, 'No se pudo reproducir este video.', true);
+      }
+    };
     slot.video.addEventListener(
-      'error',
-      () => setSlotStatus(slot, 'No se pudo reproducir este video.', true),
+      'loadeddata',
+      () => (slot.video.videoWidth ? markReady(slot) : retry()),
       { once: true }
     );
+    slot.video.addEventListener('error', retry, { once: true });
     slot.video.src = job.mediaUrl;
   } catch (err) {
     setSlotStatus(slot, err.message || 'Error al cargar el video.', true);

@@ -47,20 +47,26 @@ const CPUS = effectiveCpus();
 // termina antes. MAX_JOBS permite ajustarlo desde las variables del hosting.
 const CONCURRENCY = Math.max(1, Number(process.env.MAX_JOBS) || Math.min(3, Math.ceil(CPUS / 2)));
 let active = 0;
-const queue = [];
+let queueSeq = 0;
+const queue = []; // { task, priority, seq } — menor prioridad = se atiende antes
 
 function runNext() {
   if (active >= CONCURRENCY || queue.length === 0) return;
   active += 1;
-  const task = queue.shift();
+  const { task } = queue.shift();
   task().finally(() => {
     active -= 1;
     runNext();
   });
 }
 
-function enqueue(task) {
-  queue.push(task);
+// Prioridad 1 = lo que pidió el usuario (unir, comprimir, cortar…);
+// prioridad 2 = vistas previas, que no deben hacer esperar a lo anterior.
+const PRIORITY_USER = 1;
+const PRIORITY_PREVIEW = 2;
+function enqueue(task, priority = PRIORITY_USER) {
+  queue.push({ task, priority, seq: queueSeq++ });
+  queue.sort((a, b) => a.priority - b.priority || a.seq - b.seq);
   runNext();
 }
 
@@ -280,18 +286,19 @@ function safeBaseName(originalName) {
 // H.264/H.265 crudo de DVR, HEVC, etc.).
 // Si el navegador no tiene H.264 (p. ej. algunas versiones de Chromium/Linux)
 // se genera WebM VP8 en modo tiempo real.
-function enqueuePreviewJob(fileId, format) {
+function enqueuePreviewJob(fileId, format, { canHevc = false, forceTranscode = false } = {}) {
   const stored = getStoredFile(fileId);
   const jobId = createJob(stored.originalName);
+  const job = jobs.get(jobId);
 
-  enqueue(async () => {
-    const job = jobs.get(jobId);
+  // Recodificar (lento): solo cuando el video no se puede reempaquetar.
+  const transcode = async () => {
     job.status = 'processing';
     const outputName = `${safeBaseName(stored.originalName)}-preview-${jobId.slice(0, 8)}.${format}`;
     const command = ffmpeg(stored.path).outputOptions([
       '-map', '0:v:0',
       '-map', '0:a:0?',
-      '-vf', "scale='min(1280,iw)':-2,format=yuv420p",
+      '-vf', "scale='min(1280,iw)':-2:flags=bilinear,format=yuv420p",
       '-threads', '0',
     ]);
     if (format === 'webm') {
@@ -317,7 +324,43 @@ function enqueuePreviewJob(fileId, format) {
       job.status = 'error';
       job.error = `No se pudo leer el video: ${err.message}`;
     }
-  });
+  };
+
+  // Camino rápido: la mayoría de los DVR graban H.264 (o H.265) dentro de
+  // AVI/DAV/.264. Basta con pasarlo a MP4 sin recodificar: tarda segundos,
+  // conserva la calidad original y no ocupa la CPU que necesitan las uniones.
+  (async () => {
+    if (format === 'mp4' && !forceTranscode) {
+      const info = await probeMedia(stored.path);
+      if (info.vcodec === 'h264' || (info.vcodec === 'hevc' && canHevc)) {
+        job.status = 'processing';
+        const outputName = `${safeBaseName(stored.originalName)}-preview-${jobId.slice(0, 8)}.mp4`;
+        const command = ffmpeg(stored.path)
+          .inputOptions('-fflags', '+genpts')
+          .outputOptions(
+            '-map', '0:v:0',
+            '-map', '0:a:0?',
+            '-c:v', 'copy',
+            ...(info.vcodec === 'hevc' ? ['-tag:v', 'hvc1'] : []),
+            ...(info.acodec === 'aac' ? ['-c:a', 'copy'] : ['-c:a', 'aac', '-b:a', '128k']),
+            '-movflags', '+faststart'
+          )
+          .toFormat('mp4');
+        try {
+          await runCommand(command, path.join(OUTPUT_DIR, outputName), (p) => {
+            job.progress = p;
+          }, info.duration);
+          job.remuxed = true;
+          finishJob(job, outputName);
+          return;
+        } catch {
+          job.status = 'queued';
+          job.progress = 0;
+        }
+      }
+    }
+    enqueue(transcode, PRIORITY_PREVIEW);
+  })();
 
   return jobId;
 }
@@ -361,7 +404,7 @@ function enqueueCompressJob(fileId, level, expectedDuration, start = 0, length =
     const filters = [];
     // Solo achica videos más grandes que el límite; nunca agranda.
     if (settings.fps) filters.push(`fps=${settings.fps}`);
-    if (settings.maxHeight) filters.push(`scale=-2:'min(ih,${settings.maxHeight})'`);
+    if (settings.maxHeight) filters.push(`scale=-2:'min(ih,${settings.maxHeight})':flags=bilinear`);
     filters.push('format=yuv420p');
 
     const command = ffmpeg(stored.path);
@@ -447,11 +490,15 @@ function buildMosaicPlan({ items, cols, rows, width, fps, audioCameras = [], sta
       return;
     }
     const inputIndex = inputs.length;
-    inputs.push({ path: item.path, options: seek > 0 ? ['-ss', String(round3(seek))] : [] });
+    // Cada cámara se achica mucho en el mosaico: decodificar en modo rápido
+    // (sin el filtro de bloques) no se nota y ahorra tiempo.
+    const options = ['-skip_loop_filter', 'all', '-flags2', '+fast'];
+    if (seek > 0) options.push('-ss', String(round3(seek)));
+    inputs.push({ path: item.path, options });
 
     let chain =
       `[${inputIndex}:v:0]setpts=PTS-STARTPTS,fps=${fps},` +
-      `scale=${cellW}:${cellH}:force_original_aspect_ratio=decrease,` +
+      `scale=${cellW}:${cellH}:force_original_aspect_ratio=decrease:flags=bilinear,` +
       `pad=${cellW}:${cellH}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,format=yuv420p`;
     const tpad = [];
     if (pad > 0) tpad.push(`start_duration=${round3(pad)}`);
@@ -649,7 +696,9 @@ function enqueueImportJob(url) {
   job.fileId = null;
   job.bytes = 0;
 
-  enqueue(async () => {
+  // Descargar no usa CPU: no ocupa un lugar en la cola de procesamiento (si no,
+  // una descarga lenta de Drive haría esperar a las uniones y compresiones).
+  (async () => {
     job.status = 'processing';
     const fileId = crypto.randomUUID();
     const tempPath = partPath(fileId);
@@ -694,7 +743,7 @@ function enqueueImportJob(url) {
       job.status = 'error';
       job.error = `No se pudo descargar: ${err.message}`;
     }
-  });
+  })();
 
   return jobId;
 }
@@ -875,6 +924,12 @@ function enqueueMosaicJob(options) {
     const job = jobs.get(jobId);
     job.status = 'processing';
 
+    // fps 0 = igual que las cámaras (las de DVR suelen grabar a 12-15 cuadros
+    // por segundo: no tiene sentido inventar cuadros hasta 25).
+    if (!options.fps) {
+      const rates = (await Promise.all(options.items.map((item) => probeMedia(item.path)))).map((i) => i.fps).filter((f) => f > 0);
+      options.fps = Math.max(5, Math.min(25, Math.round(rates.length ? Math.max(...rates) : 25)));
+    }
     const audioCameras = await resolveAudioCameras(options.items, options.audioIndex);
     const plan = buildMosaicPlan({ ...options, audioCameras });
     const stamp = new Date().toISOString().replace(/[:T]/g, '-').slice(0, 19);
@@ -1220,7 +1275,12 @@ app.post('/api/preview', (req, res) => {
     return res.status(404).json({ error: 'Video no encontrado. Vuelve a subirlo.', code: 'FILE_MISSING', fileId });
   }
   const format = req.body.format === 'webm' ? 'webm' : 'mp4';
-  res.json({ jobId: enqueuePreviewJob(fileId, format) });
+  res.json({
+    jobId: enqueuePreviewJob(fileId, format, {
+      canHevc: req.body.canHevc === true,
+      forceTranscode: req.body.transcode === true,
+    }),
+  });
 });
 
 app.post('/api/mosaic', (req, res) => {
@@ -1256,7 +1316,7 @@ app.post('/api/mosaic', (req, res) => {
   }
 
   const width = Math.max(640, Math.min(3840, Math.trunc(Number(body.width)) || 1920));
-  const fps = Math.max(5, Math.min(60, Math.trunc(Number(body.fps)) || 25));
+  const fps = Number(body.fps) === 0 ? 0 : Math.max(5, Math.min(60, Math.trunc(Number(body.fps)) || 25));
   const audioIndex = Number.isInteger(body.audioIndex) ? body.audioIndex : -1;
   if (audioIndex >= items.length || audioIndex < AUDIO_ALL) {
     return res.status(400).json({ error: 'Opción de audio inválida.' });
