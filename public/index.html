@@ -112,6 +112,27 @@
       <ul class="compress-list" id="trim-list"></ul>
     </section>
 
+    <section class="merge" id="concat-section">
+      <div class="merge-head" id="concat-section-head">
+        <h2>🎞 Unir continuaciones</h2>
+        <p>Cuando una cámara viene cortada en varios videos (uno sigue después del otro), se juntan en un solo video largo para esa cámara. Después puedes unir todas las cámaras en el mosaico.</p>
+      </div>
+      <div class="merge-form">
+        <button type="button" class="btn primary" id="concat-auto-btn" title="Agrupa los videos del mismo canal (ch1_…, ch1_…) y los une en orden">🔗 Unir continuaciones automáticamente</button>
+        <button type="button" class="btn primary" id="concat-and-merge-btn" title="Une las continuaciones de cada cámara y luego todas en el mosaico">🔗 + ▦ Unir continuaciones y luego el mosaico</button>
+        <label class="check"><input type="checkbox" id="concat-gaps" checked /> Rellenar huecos con negro según la hora del nombre</label>
+      </div>
+      <p class="merge-hint" id="concat-hint">También puedes usar el botón 🎞+ de cada cámara para agregarle su continuación, o marcar abajo los videos que van juntos.</p>
+      <details class="concat-manual">
+        <summary>Elegir a mano qué videos unir</summary>
+        <p class="merge-hint" id="concat-empty">Primero agrega videos.</p>
+        <ul class="folder-list" id="concat-choices"></ul>
+        <button type="button" class="btn ghost" id="concat-selected-btn">🎞 Unir seleccionadas como una sola cámara</button>
+      </details>
+      <ul class="compress-list" id="concat-list"></ul>
+      <input type="file" id="append-input" multiple hidden />
+    </section>
+
     <section class="merge">
       <div class="merge-head" id="merge-section-head">
         <h2>Unir en un solo video</h2>

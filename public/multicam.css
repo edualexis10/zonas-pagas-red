@@ -953,3 +953,24 @@ body.pseudo-full .grid {
     width: 100%;
   }
 }
+
+/* --- Unir continuaciones --- */
+
+.concat-manual {
+  margin-top: 10px;
+}
+
+.concat-manual summary {
+  cursor: pointer;
+  color: var(--accent);
+  font-weight: 600;
+}
+
+.concat-manual .folder-list {
+  margin: 10px 0;
+  max-height: 260px;
+}
+
+.concat-manual .btn {
+  margin-top: 4px;
+}

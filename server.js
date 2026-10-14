@@ -708,6 +708,155 @@ function hasAudioStream(filePath) {
   });
 }
 
+// Datos básicos de un video leyendo la salida de "ffmpeg -i".
+function probeMedia(filePath) {
+  return new Promise((resolve) => {
+    execFile(ffmpegPath, ['-hide_banner', '-i', filePath], (err, stdout, stderr) => {
+      const text = stderr || '';
+      const dur = text.match(/Duration: (\d+):(\d+):(\d+(?:\.\d+)?)/);
+      const video = text.match(/Stream #\S+.*?: Video: (\w+)[^\n]*?, (\d{2,5})x(\d{2,5})/);
+      const fps = text.match(/Stream #\S+.*?: Video:[^\n]*?, ([\d.]+) (?:fps|tbr)/);
+      const audio = text.match(/Stream #\S+.*?: Audio: (\w+)/);
+      resolve({
+        duration: dur ? Number(dur[1]) * 3600 + Number(dur[2]) * 60 + Number(dur[3]) : 0,
+        vcodec: video ? video[1] : null,
+        width: video ? Number(video[2]) : 0,
+        height: video ? Number(video[3]) : 0,
+        fps: fps ? Number(fps[1]) : 0,
+        acodec: audio ? audio[1] : null,
+      });
+    });
+  });
+}
+
+// ---------------------------------------------------------------------------
+// Unir partes (continuaciones) de una misma cámara en un solo video
+// ---------------------------------------------------------------------------
+// Si las partes son del mismo tipo y van seguidas, se pegan sin recodificar
+// (muy rápido). Si son distintas, o hay huecos de tiempo entre ellas (según
+// la hora del nombre), se recodifica y los huecos se rellenan con negro para
+// que la cámara siga sincronizada con las demás.
+function enqueueConcatJob(parts, offsets, name) {
+  const jobId = createJob(name);
+  const job = jobs.get(jobId);
+  job.fileId = null;
+
+  enqueue(async () => {
+    job.status = 'processing';
+    const fileId = crypto.randomUUID();
+    const outPath = partPath(fileId);
+    const listPath = path.join(UPLOAD_DIR, `${fileId}.txt`);
+    try {
+      const infos = await Promise.all(parts.map((p) => probeMedia(p.path)));
+      const total = infos.reduce((sum, i) => sum + i.duration, 0);
+
+      // Huecos entre partes (solo si se conoce la hora de inicio de cada una).
+      const gaps = parts.map((_, i) => {
+        if (!offsets || i === 0) return 0;
+        const prevEnd = offsets[i - 1] + infos[i - 1].duration;
+        const gap = offsets[i] - prevEnd;
+        return gap > 1 ? Math.min(gap, 6 * 3600) : 0;
+      });
+      const hasGaps = gaps.some((g) => g > 0);
+      const first = infos[0];
+      const sameKind = infos.every(
+        (i) => i.vcodec === first.vcodec && i.width === first.width && i.height === first.height && !!i.acodec === !!first.acodec
+      );
+      const progress = (p) => {
+        job.progress = p;
+      };
+
+      let done = false;
+      if (!hasGaps && sameKind && ['h264', 'hevc'].includes(first.vcodec)) {
+        // Camino rápido: pegar sin recodificar el video.
+        fs.writeFileSync(listPath, parts.map((p) => `file '${p.path.replace(/'/g, "'\\''")}'`).join('\n'));
+        const command = ffmpeg()
+          .input(listPath)
+          .inputOptions('-f', 'concat', '-safe', '0')
+          .outputOptions(
+            '-map', '0:v:0',
+            ...(first.acodec ? ['-map', '0:a:0', '-c:a', 'aac', '-b:a', '128k'] : ['-an']),
+            '-c:v', 'copy',
+            '-movflags', '+faststart'
+          )
+          .toFormat('mp4');
+        try {
+          await runCommand(command, outPath, progress, total);
+          done = true;
+        } catch {
+          // Falló (partes incompatibles): se recodifica abajo.
+        }
+      }
+
+      if (!done) {
+        const W = Math.max(2, first.width - (first.width % 2)) || 1280;
+        const H = Math.max(2, first.height - (first.height % 2)) || 720;
+        const F = Math.round(first.fps) > 0 && first.fps <= 60 ? Math.round(first.fps) : 25;
+        const withAudio = infos.some((i) => i.acodec);
+        const command = ffmpeg();
+        parts.forEach((p) => command.input(p.path));
+        const filters = [];
+        const labels = [];
+        parts.forEach((_, i) => {
+          if (gaps[i] > 0) {
+            filters.push(`color=c=black:s=${W}x${H}:r=${F}:d=${round3(gaps[i])},format=yuv420p,setsar=1[gv${i}]`);
+            if (withAudio) filters.push(`anullsrc=r=48000:cl=stereo,atrim=duration=${round3(gaps[i])}[ga${i}]`);
+            labels.push(`[gv${i}]${withAudio ? `[ga${i}]` : ''}`);
+          }
+          filters.push(
+            `[${i}:v:0]scale=${W}:${H}:force_original_aspect_ratio=decrease,pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2:color=black,` +
+              `setsar=1,fps=${F},format=yuv420p[v${i}]`
+          );
+          if (withAudio) {
+            filters.push(
+              infos[i].acodec
+                ? `[${i}:a:0]aresample=48000,aformat=channel_layouts=stereo[a${i}]`
+                : `anullsrc=r=48000:cl=stereo,atrim=duration=${round3(infos[i].duration || 1)}[a${i}]`
+            );
+          }
+          labels.push(`[v${i}]${withAudio ? `[a${i}]` : ''}`);
+        });
+        const n = labels.length;
+        filters.push(`${labels.join('')}concat=n=${n}:v=1:a=${withAudio ? 1 : 0}[outv]${withAudio ? '[outa]' : ''}`);
+        command.outputOptions(
+          '-filter_complex', filters.join(';'),
+          '-map', '[outv]',
+          ...(withAudio ? ['-map', '[outa]', '-c:a', 'aac', '-b:a', '128k'] : ['-an']),
+          '-c:v', 'libx264',
+          '-preset', 'veryfast',
+          '-crf', '20',
+          '-threads', '0',
+          '-movflags', '+faststart'
+        );
+        command.toFormat('mp4');
+        await runCommand(command, outPath, progress, total + gaps.reduce((a, b) => a + b, 0));
+      }
+
+      registerStoredFile(fileId, name);
+      // Copia descargable (enlace duro: no ocupa espacio extra).
+      const outputName = `${safeBaseName(name)}-unido-${jobId.slice(0, 6)}.mp4`;
+      try {
+        fs.linkSync(outPath, path.join(OUTPUT_DIR, outputName));
+      } catch {
+        fs.copyFileSync(outPath, path.join(OUTPUT_DIR, outputName));
+      }
+      // Los datos se completan antes de marcar "listo" (el navegador consulta en paralelo).
+      job.fileId = fileId;
+      job.gaps = gaps.filter((g) => g > 0).length;
+      job.duration = (await probeMedia(outPath)).duration;
+      finishJob(job, outputName);
+    } catch (err) {
+      fs.unlink(outPath, () => {});
+      job.status = 'error';
+      job.error = `No se pudieron unir las partes: ${err.message}`;
+    } finally {
+      fs.unlink(listPath, () => {});
+    }
+  });
+
+  return jobId;
+}
+
 async function resolveAudioCameras(items, audioIndex) {
   if (audioIndex === AUDIO_ALL) {
     const flags = await Promise.all(items.map((item) => hasAudioStream(item.path)));
@@ -1027,6 +1176,27 @@ app.post('/api/import', (req, res) => {
 app.post('/api/files/check', (req, res) => {
   const ids = Array.isArray(req.body && req.body.fileIds) ? req.body.fileIds.slice(0, 50) : [];
   res.json({ missing: ids.filter((id) => !getStoredFile(id)) });
+});
+
+app.post('/api/concat', (req, res) => {
+  const ids = Array.isArray(req.body && req.body.fileIds) ? req.body.fileIds : [];
+  if (ids.length < 2 || ids.length > 50) {
+    return res.status(400).json({ error: 'Elige entre 2 y 50 partes para unir.' });
+  }
+  const parts = [];
+  for (const id of ids) {
+    const stored = getStoredFile(id);
+    if (!stored) {
+      return res.status(404).json({ error: 'Una de las partes ya no está en el servidor.', code: 'FILE_MISSING', fileId: id });
+    }
+    parts.push(stored);
+  }
+  // offsets: segundos desde el inicio de la primera parte (de la hora del nombre).
+  const raw = req.body.offsets;
+  const offsets =
+    Array.isArray(raw) && raw.length === ids.length && raw.every((n) => Number.isFinite(Number(n))) ? raw.map(Number) : null;
+  const name = String((req.body && req.body.name) || parts[0].originalName).slice(0, 200);
+  res.json({ jobId: enqueueConcatJob(parts, offsets, name) });
 });
 
 app.post('/api/compress', (req, res) => {

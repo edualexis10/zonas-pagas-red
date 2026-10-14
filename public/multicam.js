@@ -495,13 +495,13 @@ function isShareLink(url) {
 
 function loadSlot(slot) {
   slot.loaded = true;
-  if (SERVER_ONLY_EXT.includes(extOf(slot.name)) || (slot.sourceUrl && isShareLink(slot.sourceUrl))) {
+  if (!slot.mediaUrl && (SERVER_ONLY_EXT.includes(extOf(slot.name)) || (slot.sourceUrl && isShareLink(slot.sourceUrl)))) {
     loadViaServer(slot);
     return;
   }
 
   setSlotStatus(slot, 'Abriendo…');
-  const src = slot.sourceUrl || (slot.objectUrl = URL.createObjectURL(slot.file));
+  const src = slot.mediaUrl || slot.sourceUrl || (slot.objectUrl = URL.createObjectURL(slot.file));
   const video = slot.video;
   let settled = false;
 
@@ -663,6 +663,7 @@ function setMoving(id) {
 }
 
 function renderTray() {
+  if (typeof renderConcatList === 'function') renderConcatList();
   const section = $('tray');
   const items = $('tray-items');
   section.hidden = tray.length === 0;
@@ -870,6 +871,7 @@ function buildTile(slot, index) {
       <button type="button" data-act="left" title="Mover antes">◀</button>
       <button type="button" data-act="right" title="Mover después">▶</button>
       <button type="button" data-act="focus" title="Ampliar / volver a la grilla">${focusedId === slot.id ? '▦' : '⤢'}</button>
+      <button type="button" data-act="append" title="Agregar la continuación de esta cámara (otro video que sigue después)">🎞+</button>
       <button type="button" data-act="tray" title="Sacar de la pantalla (queda en Disponibles)">⤓</button>
       <button type="button" data-act="remove" title="Eliminar del todo">🗑</button>
     </span>
@@ -892,6 +894,7 @@ function buildTile(slot, index) {
       if (act === 'right') moveSlot(slot.id, 1);
       if (act === 'remove') removeSlot(slot.id);
       if (act === 'tray') moveToTray(slot.id);
+      if (act === 'append') pickContinuation(slot);
       if (act === 'move') setMoving(slot.id);
       if (act === 'focus') toggleFocus(slot.id);
     });
@@ -1060,6 +1063,7 @@ function snapshot() {
 
 function updateMergeState() {
   mergeBtn.disabled = slots.length === 0 || mergeBtn.dataset.busy === '1';
+  if (typeof renderConcatList === 'function') renderConcatList();
   updateCompressOptions();
   if (typeof updateTrimUI === 'function' && $('trim-hint')) updateTrimUI();
 }
@@ -1524,6 +1528,180 @@ $('trim-merge-btn').addEventListener('click', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Unir continuaciones (varias partes de una misma cámara)
+// ---------------------------------------------------------------------------
+
+// Nombre del canal sin fechas/horas, para reconocer las partes de una misma
+// cámara: "ch1_261006093000_261006095000.avi" → "ch1".
+function channelKey(name) {
+  const key = name
+    .replace(/\s*\(\+\d+ partes?\)$/, '')
+    .replace(/\.[a-z0-9]{2,5}$/i, '')
+    .replace(/(?<!\d)20\d{12}(?!\d)/g, '')
+    .replace(/(?<!\d)\d{6}[-_]\d{6}([-_]\d{6})?(?!\d)/g, '')
+    .replace(/(?<!\d)\d{12}(?!\d)/g, '')
+    .replace(/\d{9,}/g, '')
+    .replace(/[\s_\-.]+/g, ' ')
+    .trim()
+    .toLowerCase();
+  return /[a-z0-9]/.test(key) ? key : null;
+}
+
+function concatOrder(parts) {
+  const times = parts.map((p) => startTimeFromName(p.name));
+  const allTimed = times.every((t) => t !== null);
+  const ordered = parts
+    .map((p, i) => ({ p, t: times[i], i }))
+    .sort((a, b) => (allTimed ? a.t - b.t : a.p.name.localeCompare(b.p.name, 'es', { numeric: true })));
+  return { ordered: ordered.map((o) => o.p), times: allTimed ? ordered.map((o) => o.t) : null };
+}
+
+function addConcatRow(name) {
+  return addCompressRow(name, $('concat-list'));
+}
+
+// Une las partes en un solo video y lo deja en "base" (la cámara que queda en
+// pantalla). Las demás partes se quitan porque ya quedaron dentro.
+async function joinParts(base, others) {
+  const { ordered, times } = concatOrder([base, ...others]);
+  const first = ordered[0];
+  const row = addConcatRow(`${first.name} + ${ordered.length - 1} parte(s)`);
+  const fillGaps = $('concat-gaps').checked && times;
+  try {
+    const progress = ordered.map(() => 0);
+    const fileIds = await Promise.all(
+      ordered.map((slot, i) =>
+        ensureUploaded(slot, (pct) => {
+          progress[i] = pct || 0;
+          const avg = Math.round(progress.reduce((a, b) => a + b, 0) / ordered.length);
+          row.set(`Subiendo partes… ${avg}%`, avg * 0.4);
+        })
+      )
+    );
+    const offsets = fillGaps ? times.map((t) => (t - times[0]) / 1000) : undefined;
+    const name = `${first.name.replace(/\s*\(\+\d+ partes?\)$/, '')} (+${ordered.length - 1} parte${ordered.length > 2 ? 's' : ''})`;
+    const job = await runServerJob(
+      () => postJson('/api/concat', { fileIds, offsets, name }),
+      (j) => row.set(j.status === 'queued' ? 'En cola…' : `Uniendo partes… ${j.progress}%`, 40 + j.progress * 0.6)
+    );
+
+    // Las otras partes ya están dentro del video unido.
+    ordered.filter((s) => s !== base).forEach((s) => removeSlot(s.id));
+    base.name = name;
+    base.file = null;
+    base.sourceUrl = null;
+    base.keepName = true;
+    base.fileIdPromise = Promise.resolve(job.fileId);
+    base.mediaUrl = job.mediaUrl;
+    base.ready = false;
+    base.duration = 0;
+    if (clockBase !== null && times) base.delay = Math.round((times[0] - clockBase) / 100) / 10;
+    if (slots.includes(base)) loadSlot(base);
+    else base.loaded = false;
+    render();
+    renderTray();
+    updateTimeline();
+
+    const gapNote = job.gaps ? ` · ${job.gaps} hueco(s) rellenado(s) con negro` : '';
+    row.set(`✅ ${ordered.length} partes unidas · ${formatTime(job.duration || 0)}${gapNote}`, 100, 'success');
+    const link = document.createElement('a');
+    link.className = 'btn success';
+    link.href = job.downloadUrl;
+    link.setAttribute('download', job.fileName);
+    link.textContent = '⬇ Descargar video unido';
+    row.li.appendChild(link);
+    return true;
+  } catch (err) {
+    row.set(err.message || 'Error al unir las partes.', 100, 'error');
+    return false;
+  }
+}
+
+// Botón 🎞+ de una cámara: elegir los archivos que siguen después.
+let continuationBase = null;
+function pickContinuation(slot) {
+  continuationBase = slot;
+  $('append-input').click();
+}
+
+$('append-input').addEventListener('change', async () => {
+  const base = continuationBase;
+  const files = Array.from($('append-input').files);
+  $('append-input').value = '';
+  continuationBase = null;
+  if (!base || !files.length) return;
+  const parts = files.map((file) => createSlot({ file, name: file.name }));
+  $('concat-section-head').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  await joinParts(base, parts);
+});
+
+function renderConcatList() {
+  const list = $('concat-choices');
+  if (!list) return;
+  const checked = new Set(Array.from(list.querySelectorAll('input:checked')).map((c) => Number(c.value)));
+  list.innerHTML = '';
+  [...slots, ...tray].forEach((slot) => {
+    const li = document.createElement('li');
+    const where = slots.includes(slot) ? `CAM ${slots.indexOf(slot) + 1}` : 'Disponible';
+    li.innerHTML = `<label><input type="checkbox" value="${slot.id}" ${checked.has(slot.id) ? 'checked' : ''} /> <b></b> <span></span></label>`;
+    li.querySelector('b').textContent = where;
+    li.querySelector('span').textContent = slot.name;
+    list.appendChild(li);
+  });
+  $('concat-empty').hidden = slots.length + tray.length > 0;
+}
+
+async function joinSelected() {
+  const ids = Array.from($('concat-choices').querySelectorAll('input:checked')).map((c) => Number(c.value));
+  const chosen = [...slots, ...tray].filter((s) => ids.includes(s.id));
+  if (chosen.length < 2) {
+    alert('Marca al menos 2 videos: la primera parte y su continuación.');
+    return;
+  }
+  const base = chosen.find((s) => slots.includes(s)) || chosen[0];
+  await joinParts(base, chosen.filter((s) => s !== base));
+  if (!slots.includes(base)) activateFromTray(base.id);
+}
+
+// Agrupa por canal todas las cámaras (en pantalla y en Disponibles) y une las
+// partes de cada una. Devuelve cuántos grupos se unieron.
+async function joinAllByChannel() {
+  const groups = new Map();
+  const unknown = [];
+  [...slots, ...tray].forEach((slot) => {
+    const key = channelKey(slot.name);
+    if (!key) return unknown.push(slot.name);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(slot);
+  });
+  const toJoin = [...groups.values()].filter((g) => g.length > 1);
+  const note = $('concat-hint');
+  if (!toJoin.length) {
+    note.textContent =
+      '⚠ No encontré partes del mismo canal (nombres como ch1_…, ch1_…). Marca a mano los videos que van juntos y pulsa "Unir seleccionadas".';
+    return 0;
+  }
+  note.textContent = `Encontré ${toJoin.length} cámara(s) con continuaciones: ${toJoin
+    .map((g) => `${channelKey(g[0].name)} (${g.length} partes)`)
+    .join(', ')}.${unknown.length ? ` Sin canal reconocible: ${unknown.length} video(s).` : ''}`;
+  for (const group of toJoin) {
+    const base = group.find((s) => slots.includes(s)) || group[0];
+    await joinParts(base, group.filter((s) => s !== base));
+    if (!slots.includes(base) && slots.length < MAX_CAMERAS) activateFromTray(base.id);
+  }
+  return toJoin.length;
+}
+
+$('append-input').accept = fileInput.accept;
+$('concat-auto-btn').addEventListener('click', () => joinAllByChannel());
+$('concat-selected-btn').addEventListener('click', joinSelected);
+$('concat-and-merge-btn').addEventListener('click', async () => {
+  await joinAllByChannel();
+  $('merge-section-head').scrollIntoView({ behavior: 'smooth', block: 'start' });
+  await merge();
+});
+
+// ---------------------------------------------------------------------------
 // Eventos
 // ---------------------------------------------------------------------------
 
@@ -1554,6 +1732,9 @@ fileInput.addEventListener('cancel', () => {
 
 $('clear-btn').addEventListener('click', () => {
   [...slots, ...tray].forEach((s) => removeSlot(s.id));
+  ['concat-list', 'trim-list', 'compress-list'].forEach((id) => {
+    $(id).innerHTML = '';
+  });
   setPlaying(false);
   clock = 0;
   updateTimeline();
