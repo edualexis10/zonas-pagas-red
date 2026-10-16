@@ -430,6 +430,13 @@ function nameFromUrl(url) {
 // { toTray: true }) quedan en "Disponibles" sin cargarse, para no gastar
 // descargas ni conversiones en cámaras que quizá no se usen.
 function addSources(sources, { toTray = false } = {}) {
+  // Continuaciones (varias partes del mismo canal): se unen de inmediato, sin
+  // preparar cada parte por separado para verla (eso era trabajo doble).
+  if (!toTray && autoJoinEnabled()) {
+    const { singles, groups } = groupContinuations(sources);
+    groups.forEach(startGroupJoin);
+    sources = singles;
+  }
   const free = toTray ? 0 : Math.max(0, MAX_CAMERAS - slots.length);
   const extra = sources.slice(free);
   if (extra.length) {
@@ -1579,7 +1586,15 @@ function addConcatRow(name) {
 async function joinParts(base, others) {
   const { ordered, times } = concatOrder([base, ...others]);
   const first = ordered[0];
-  const row = addConcatRow(`${first.name} + ${ordered.length - 1} parte(s)`);
+  const concatRow = addConcatRow(`${first.name} + ${ordered.length - 1} parte(s)`);
+  // El avance se ve también en la cámara misma mientras se une.
+  const row = {
+    li: concatRow.li,
+    set(text, pct, type) {
+      concatRow.set(text, pct, type);
+      if (slots.includes(base) && !base.ready && type !== 'success') setSlotStatus(base, `🎞 ${text}`, type === 'error');
+    },
+  };
   const fillGaps = $('concat-gaps').checked && times;
   try {
     const progress = ordered.map(() => 0);
@@ -1630,6 +1645,71 @@ async function joinParts(base, others) {
     return false;
   }
 }
+
+// --- Unir al cargar ---
+
+function autoJoinEnabled() {
+  const box = $('concat-onload');
+  return !box || box.checked;
+}
+
+// Separa los videos que son continuaciones (mismo canal, 2 o más partes) de
+// los sueltos.
+function groupContinuations(sources) {
+  const byKey = new Map();
+  sources.forEach((src) => {
+    const key = channelKey(src.name);
+    if (!key) return;
+    if (!byKey.has(key)) byKey.set(key, []);
+    byKey.get(key).push(src);
+  });
+  const grouped = new Set();
+  const groups = [];
+  byKey.forEach((list) => {
+    if (list.length < 2) return;
+    list.forEach((src) => grouped.add(src));
+    groups.push(list);
+  });
+  return { singles: sources.filter((src) => !grouped.has(src)), groups };
+}
+
+// Crea una sola cámara para el grupo y une sus partes enseguida. Si la unión
+// falla, las partes quedan como cámaras sueltas para no perder nada.
+function startGroupJoin(group) {
+  const partSlots = group.map((src) => createSlot(src));
+  const { ordered } = concatOrder(partSlots);
+  const base = ordered[0];
+  const others = ordered.slice(1);
+  base.loaded = true; // no se prepara para ver hasta que esté unida
+  if (slots.length < MAX_CAMERAS) slots.push(base);
+  else tray.push(base);
+  setSlotStatus(base, `🎞 Uniendo ${ordered.length} partes…`);
+  $('concat-hint').textContent = `Uniendo automáticamente ${ordered.length} partes de "${channelKey(base.name)}" al cargar.`;
+  render();
+  renderTray();
+  joinParts(base, others).then((ok) => {
+    if (ok) return;
+    if (slots.includes(base)) loadSlot(base);
+    else base.loaded = false;
+    others.forEach((slot) => tray.push(slot));
+    renderTray();
+  });
+}
+
+$('concat-onload').checked = (() => {
+  try {
+    return localStorage.getItem('concatOnLoad') !== '0';
+  } catch {
+    return true;
+  }
+})();
+$('concat-onload').addEventListener('change', () => {
+  try {
+    localStorage.setItem('concatOnLoad', $('concat-onload').checked ? '1' : '0');
+  } catch {
+    // sin almacenamiento: solo dura esta visita
+  }
+});
 
 // Botón 🎞+ de una cámara: elegir los archivos que siguen después.
 let continuationBase = null;
