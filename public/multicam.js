@@ -12,7 +12,24 @@ const PREVIEW_FORMAT = document.createElement('video').canPlayType('video/mp4; c
 const AUDIO_ALL = -2;
 // ¿El navegador reproduce H.265/HEVC? (Chrome/Edge con aceleración, Safari):
 // así el servidor puede entregar el video tal cual, sin recodificarlo.
-const CAN_HEVC = !!document.createElement('video').canPlayType('video/mp4; codecs="hvc1.1.6.L93.B0"');
+let CAN_HEVC = !!document.createElement('video').canPlayType('video/mp4; codecs="hvc1.1.6.L93.B0"');
+const IS_FIREFOX = /Firefox\//.test(navigator.userAgent);
+// canPlayType a veces responde "no" aunque la tarjeta gráfica sí decodifica
+// H.265: se pregunta también con MediaCapabilities.
+if (!CAN_HEVC && navigator.mediaCapabilities && navigator.mediaCapabilities.decodingInfo) {
+  navigator.mediaCapabilities
+    .decodingInfo({
+      type: 'file',
+      video: { contentType: 'video/mp4; codecs="hvc1.1.6.L93.B0"', width: 1920, height: 1080, bitrate: 4000000, framerate: 25 },
+    })
+    .then((r) => {
+      if (r.supported) CAN_HEVC = true;
+    })
+    .catch(() => {});
+}
+// Firefox nunca reproduce H.265; los demás (Chrome, Edge, Safari) se prueba
+// directamente: si no lo logran, recién ahí se usa el servidor.
+const TRY_HEVC_LOCALLY = () => CAN_HEVC || !IS_FIREFOX;
 const AUTO_LAYOUTS = [[1, 1], [1, 1], [2, 1], [2, 2], [2, 2], [3, 2], [3, 2], [4, 2], [4, 2]];
 
 const $ = (id) => document.getElementById(id);
@@ -526,7 +543,12 @@ function loadSlot(slot) {
     cleanup();
     video.removeAttribute('src');
     video.load();
-    if (slot.localMp4 && !slot.serverReason) slot.serverReason = 'este navegador no pudo reproducirlo directamente';
+    if (slot.localMp4 && !slot.serverReason) {
+      slot.serverReason =
+        slot.localCodec === 'hevc'
+          ? 'este equipo no tiene decodificador H.265 para el navegador; se convierte en el servidor'
+          : 'este navegador no pudo reproducirlo directamente';
+    }
     loadViaServer(slot);
   };
   const ok = () => {
@@ -552,7 +574,7 @@ async function loadLocally(slot) {
   try {
     setSlotStatus(slot, 'Preparando en tu equipo…');
     const result = await LocalFF.toMp4(slot.file, {
-      canHevc: CAN_HEVC,
+      canHevc: TRY_HEVC_LOCALLY(),
       onProgress: (pct) => {
         if (!slot.removed) setSlotStatus(slot, `Preparando en tu equipo… ${pct}%`);
       },
@@ -564,6 +586,7 @@ async function loadLocally(slot) {
       return loadViaServer(slot);
     }
     slot.localMp4 = result.blob;
+    slot.localCodec = result.info.vcodec;
     slot.mediaUrl = URL.createObjectURL(result.blob);
     if (result.info.vcodec === 'h264') slot.mp4 = { url: slot.mediaUrl, name: mp4Name(slot.name) };
     // Si el navegador no logra reproducirlo, loadSlot recurre al servidor.
@@ -583,9 +606,12 @@ function whyServer(result, file) {
   if (result.skip === 'browser') return 'este navegador no puede procesar videos localmente';
   if (result.skip === 'codec') {
     const name = CODEC_NAMES[result.codec] || String(result.codec).toUpperCase();
-    return result.codec === 'hevc'
-      ? 'video H.265: este navegador no lo reproduce. En Chrome o Edge suele verse sin subirlo'
-      : `video ${name}: hay que convertirlo`;
+    if (result.codec === 'hevc') {
+      return IS_FIREFOX
+        ? 'video H.265: Firefox no lo reproduce. Ábrelo en Chrome o Edge para verlo sin subirlo'
+        : 'video H.265: este navegador no lo reproduce';
+    }
+    return `video ${name}: hay que convertirlo`;
   }
   return 'formato no reconocido';
 }

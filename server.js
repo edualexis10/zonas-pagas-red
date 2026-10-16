@@ -295,12 +295,16 @@ function enqueuePreviewJob(fileId, format, { canHevc = false, forceTranscode = f
   const transcode = async () => {
     job.status = 'processing';
     const outputName = `${safeBaseName(stored.originalName)}-preview-${jobId.slice(0, 8)}.${format}`;
-    const command = ffmpeg(stored.path).outputOptions([
-      '-map', '0:v:0',
-      '-map', '0:a:0?',
-      '-vf', "scale='min(960,iw)':-2:flags=bilinear,format=yuv420p",
-      '-threads', '0',
-    ]);
+    // Solo para mirar en la grilla: decodificación rápida y máx. 15 cuadros
+    // por segundo (decodificar H.265 es lo más pesado de este paso).
+    const command = ffmpeg(stored.path)
+      .inputOptions('-skip_loop_filter', 'all', '-flags2', '+fast')
+      .outputOptions([
+        '-map', '0:v:0',
+        '-map', '0:a:0?',
+        '-vf', "fps='min(15,source_fps)',scale='min(960,iw)':-2:flags=bilinear,format=yuv420p",
+        '-threads', '0',
+      ]);
     if (format === 'webm') {
       command
         .videoCodec('libvpx')
