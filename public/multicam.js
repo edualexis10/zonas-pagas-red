@@ -581,6 +581,9 @@ async function loadViaServer(slot, forceTranscode = false) {
       { once: true }
     );
     slot.video.addEventListener('error', retry, { once: true });
+    // Si se reempaquetó un H.264 sin recodificar, ese MP4 ya es el video
+    // completo en calidad original: queda listo para descargar.
+    if (job.remuxed && job.vcodec === 'h264') slot.mp4 = { url: job.downloadUrl, name: mp4Name(slot.name) };
     slot.video.src = job.mediaUrl;
   } catch (err) {
     setSlotStatus(slot, err.message || 'Error al cargar el video.', true);
@@ -892,6 +895,7 @@ function buildTile(slot, index) {
       <button type="button" data-act="left" title="Mover antes">◀</button>
       <button type="button" data-act="right" title="Mover después">▶</button>
       <button type="button" data-act="focus" title="Ampliar / volver a la grilla">${focusedId === slot.id ? '▦' : '⤢'}</button>
+      <button type="button" data-act="mp4" title="Descargar esta cámara en MP4">⬇MP4</button>
       <button type="button" data-act="append" title="Agregar la continuación de esta cámara (otro video que sigue después)">🎞+</button>
       <button type="button" data-act="tray" title="Sacar de la pantalla (queda en Disponibles)">⤓</button>
       <button type="button" data-act="remove" title="Eliminar del todo">🗑</button>
@@ -916,6 +920,7 @@ function buildTile(slot, index) {
       if (act === 'remove') removeSlot(slot.id);
       if (act === 'tray') moveToTray(slot.id);
       if (act === 'append') pickContinuation(slot);
+      if (act === 'mp4') downloadMp4(slot);
       if (act === 'move') setMoving(slot.id);
       if (act === 'focus') toggleFocus(slot.id);
     });
@@ -1622,6 +1627,7 @@ async function joinParts(base, others) {
     base.keepName = true;
     base.fileIdPromise = Promise.resolve(job.fileId);
     base.mediaUrl = job.mediaUrl;
+    base.mp4 = { url: job.downloadUrl, name: mp4Name(name) };
     base.ready = false;
     base.duration = 0;
     if (clockBase !== null && times) base.delay = Math.round((times[0] - clockBase) / 100) / 10;
@@ -1645,6 +1651,86 @@ async function joinParts(base, others) {
     return false;
   }
 }
+
+// --- Descargar en MP4 ---
+
+function mp4Name(name) {
+  const clean = String(name).replace(/\s*\(\+(\d+) partes?\)$/, '_unido_$1').replace(/\.[a-z0-9]{2,5}(?=(_unido_\d+)?$)/i, '');
+  return `${clean}.mp4`;
+}
+
+function withName(url, name) {
+  return `${url}${url.includes('?') ? '&' : '?'}name=${encodeURIComponent(name)}`;
+}
+
+// MP4 compatible con cualquier reproductor (H.264 + AAC), en calidad original.
+// - Si ya existe (video MP4 propio, reempaquetado sin recodificar o unido), se
+//   descarga al instante.
+// - Si no (p. ej. el DVR grabó en H.265), se convierte en el servidor.
+async function downloadMp4(slot, { auto = true } = {}) {
+  if (slot.mp4) {
+    if (auto) triggerDownload(slot.mp4.url.startsWith('blob:') ? slot.mp4.url : withName(slot.mp4.url, slot.mp4.name), slot.mp4.name);
+    return slot.mp4;
+  }
+  if (slot.file && /\.mp4$/i.test(slot.name) && slot.ready && slot.objectUrl) {
+    slot.mp4 = { url: slot.objectUrl, name: slot.name };
+    return downloadMp4(slot, { auto });
+  }
+  if (slot.mp4Promise) return slot.mp4Promise;
+  const show = (text, isError) => {
+    if (slots.includes(slot)) setSlotStatus(slot, text, isError);
+  };
+  const keepReady = slot.ready;
+  slot.mp4Promise = (async () => {
+    try {
+      const job = await withFile(
+        slot,
+        (pct) => show(`⬇ MP4: subiendo… ${pct || 0}%`),
+        (fileId) =>
+          runServerJob(
+            () => postJson('/api/compress', { fileId, level: 'corte', expectedDuration: slot.duration || 0 }),
+            (j) => show(j.status === 'queued' ? '⬇ MP4: en cola…' : `⬇ MP4: convirtiendo… ${j.progress}%`)
+          )
+      );
+      slot.mp4 = { url: job.downloadUrl, name: mp4Name(slot.name) };
+      if (keepReady) show('');
+      if (auto) triggerDownload(withName(slot.mp4.url, slot.mp4.name), slot.mp4.name);
+      return slot.mp4;
+    } catch (err) {
+      show(`⬇ MP4: ${err.message || 'no se pudo convertir'}`, true);
+      throw err;
+    } finally {
+      slot.mp4Promise = null;
+    }
+  })();
+  return slot.mp4Promise;
+}
+
+async function downloadAllMp4() {
+  const btn = $('mp4-all-btn');
+  btn.disabled = true;
+  const list = $('compress-list');
+  list.innerHTML = '';
+  for (const [i, slot] of slots.entries()) {
+    const row = addCompressRow(`Cámara ${i + 1} · ${slot.name}`, list);
+    row.set(slot.mp4 ? 'Listo' : 'Preparando MP4…', slot.mp4 ? 100 : 30);
+    try {
+      const mp4 = await downloadMp4(slot, { auto: false });
+      row.set(`✅ ${mp4.name}`, 100, 'success');
+      const link = document.createElement('a');
+      link.className = 'btn success';
+      link.href = mp4.url.startsWith('blob:') ? mp4.url : withName(mp4.url, mp4.name);
+      link.setAttribute('download', mp4.name);
+      link.textContent = '⬇ Descargar MP4';
+      row.li.appendChild(link);
+    } catch (err) {
+      row.set(err.message || 'No se pudo convertir.', 100, 'error');
+    }
+  }
+  btn.disabled = false;
+}
+
+$('mp4-all-btn').addEventListener('click', downloadAllMp4);
 
 // --- Unir al cargar ---
 

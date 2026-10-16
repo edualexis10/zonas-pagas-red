@@ -351,6 +351,7 @@ function enqueuePreviewJob(fileId, format, { canHevc = false, forceTranscode = f
             job.progress = p;
           }, info.duration);
           job.remuxed = true;
+          job.vcodec = info.vcodec;
           finishJob(job, outputName);
           return;
         } catch {
@@ -839,7 +840,9 @@ function enqueueConcatJob(parts, offsets, name) {
       };
 
       let done = false;
-      if (!hasGaps && sameKind && ['h264', 'hevc'].includes(first.vcodec)) {
+      // Solo H.264 se pega sin recodificar: así el MP4 resultante se abre en
+      // cualquier reproductor (H.265 dentro de MP4 no abre en muchos).
+      if (!hasGaps && sameKind && first.vcodec === 'h264') {
         // Camino rápido: pegar sin recodificar el video.
         // El video se pega sin recodificar; el audio de cada parte se toma de
         // su propio archivo y se une aparte (rápido: el audio pesa poco).
@@ -1382,7 +1385,9 @@ app.get('/api/download/:fileName', (req, res) => {
     return res.status(404).json({ error: 'Archivo no encontrado.' });
   }
 
-  res.download(filePath, fileName);
+  // ?name= permite descargar con un nombre amigable (p. ej. "ch1_….mp4").
+  const wanted = typeof req.query.name === 'string' ? path.basename(req.query.name).replace(/[\\/:*?"<>|]/g, '_').slice(0, 180) : '';
+  res.download(filePath, wanted || fileName);
 });
 
 app.use((err, req, res, next) => {
