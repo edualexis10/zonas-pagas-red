@@ -13,6 +13,10 @@ Aplicación web para ver hasta **8 cámaras sincronizadas** a la vez (como un DV
 
 El plan gratis "duerme" tras 15 minutos sin uso (la primera visita tarda ~1 minuto en despertar) y tiene poca CPU, así que unir muchos videos largos es lento; el plan *Starter* es más rápido.
 
+### Procesar en el equipo (sin subir)
+
+Lo que no necesita recodificar se hace **en el navegador del usuario** con ffmpeg en WebAssembly (`public/local-ffmpeg.js`, paquetes `@ffmpeg/*` servidos en `/vendor`): pasar AVI/DAV/.264 con H.264 a MP4 para verlos y descargarlos, y unir continuaciones H.264 seguidas. No se sube nada para eso (hasta 1.5 GB por operación en computador, 400 MB en celular; lo más grande va al servidor). El mosaico y la compresión siguen en el servidor; con *Subir en segundo plano* los videos se van subiendo mientras se miran para que esas tareas empiecen de inmediato. En *Unir* hay una opción de velocidad *Rápida* (casi el doble de rápido, archivo más pesado).
+
 ### Videos grandes y reinicios del servidor
 
 - Las subidas son **reanudables**: el progreso de cada subida se guarda en disco y el navegador reintenta solo ante cortes de red o reinicios del servidor, continuando desde lo ya recibido. Si el servidor perdió la subida o un video (disco borrado), lo vuelve a subir automáticamente.

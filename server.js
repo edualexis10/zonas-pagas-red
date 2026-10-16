@@ -980,7 +980,8 @@ function enqueueMosaicJob(options) {
       '-filter_complex', plan.filter,
       '-map', '[out]',
       '-c:v', 'libx264',
-      '-preset', 'veryfast',
+      // "rapida": cerca del doble de rápido, a cambio de un archivo más pesado.
+      '-preset', options.speed === 'rapida' ? 'superfast' : 'veryfast',
       '-crf', String(MOSAIC_QUALITY_CRF[options.quality] || MOSAIC_QUALITY_CRF.normal),
       '-pix_fmt', 'yuv420p',
       '-r', String(options.fps),
@@ -1111,6 +1112,11 @@ if (APP_PASSWORD) {
 app.use('/api/informe', informe.router);
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
+// ffmpeg para el navegador (WebAssembly): reempaqueta y une videos del DVR en
+// el propio equipo del usuario, sin subirlos al servidor.
+const FFMPEG_WASM = path.join(__dirname, 'node_modules', '@ffmpeg');
+app.use('/vendor/ffmpeg', express.static(path.join(FFMPEG_WASM, 'ffmpeg', 'dist', 'umd'), { maxAge: '30d' }));
+app.use('/vendor/ffmpeg-core', express.static(path.join(FFMPEG_WASM, 'core', 'dist', 'umd'), { maxAge: '30d' }));
 
 app.post('/api/upload/init', (req, res) => {
   const fileName = req.body && req.body.fileName;
@@ -1360,7 +1366,8 @@ app.post('/api/mosaic', (req, res) => {
   const length = end > start ? end - start : expectedDuration > 0 ? Math.max(0, expectedDuration - start) : 0;
 
   const quality = MOSAIC_QUALITY_CRF[body.quality] ? body.quality : 'normal';
-  const jobId = enqueueMosaicJob({ items, cols, rows, width, fps, audioIndex, expectedDuration, quality, start, length });
+  const speed = body.speed === 'rapida' ? 'rapida' : 'normal';
+  const jobId = enqueueMosaicJob({ items, cols, rows, width, fps, audioIndex, expectedDuration, quality, start, length, speed });
   res.json({ jobId });
 });
 

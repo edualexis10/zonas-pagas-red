@@ -1,5 +1,5 @@
 const MAX_CAMERAS = 8;
-const CHUNK_SIZE = 4 * 1024 * 1024; // 4 MB
+const CHUNK_SIZE = 8 * 1024 * 1024; // 8 MB (si un proxy lo rechaza, se parte en trozos más chicos)
 const MIN_CHUNK_SIZE = 256 * 1024;
 const NATIVE_TIMEOUT_MS = 6000;
 const FRAME_STEP = 1 / 25;
@@ -137,7 +137,7 @@ function missingChunks(size, ranges) {
   return chunks;
 }
 
-// Sube un video de cualquier tamaño. Envía 3 trozos a la vez; si se corta la
+// Sube un video de cualquier tamaño. Envía 4 trozos a la vez; si se corta la
 // conexión o el servidor se reinicia, reintenta solo y continúa desde lo que
 // el servidor ya recibió. Si el servidor perdió la subida (p. ej. se borró su
 // disco al reiniciarse), la empieza de nuevo automáticamente.
@@ -202,7 +202,7 @@ async function uploadParts(file, uploadId, onProgress) {
         await sendChunk(a, b);
       }
     };
-    await Promise.all([worker(), worker(), worker()]);
+    await Promise.all([worker(), worker(), worker(), worker()]);
 
     try {
       const result = await withRetry(() => postJson('/api/upload/complete', { uploadId }));
@@ -506,7 +506,9 @@ function isShareLink(url) {
 function loadSlot(slot) {
   slot.loaded = true;
   if (!slot.mediaUrl && (SERVER_ONLY_EXT.includes(extOf(slot.name)) || (slot.sourceUrl && isShareLink(slot.sourceUrl)))) {
-    loadViaServer(slot);
+    // Videos del DVR en el equipo: se pasan a MP4 aquí mismo, sin subirlos.
+    if (slot.file && LocalFF.canUse([slot.file])) loadLocally(slot);
+    else loadViaServer(slot);
     return;
   }
 
@@ -540,6 +542,27 @@ function loadSlot(slot) {
   video.addEventListener('loadeddata', ok);
   video.addEventListener('error', fallback);
   video.src = src;
+}
+
+async function loadLocally(slot) {
+  try {
+    setSlotStatus(slot, 'Preparando en tu equipo…');
+    const result = await LocalFF.toMp4(slot.file, {
+      canHevc: CAN_HEVC,
+      onProgress: (pct) => {
+        if (!slot.removed) setSlotStatus(slot, `Preparando en tu equipo… ${pct}%`);
+      },
+    });
+    if (slot.removed) return;
+    if (!result) return loadViaServer(slot); // otro formato de video: lo hace el servidor
+    slot.localMp4 = result.blob;
+    slot.mediaUrl = URL.createObjectURL(result.blob);
+    if (result.info.vcodec === 'h264') slot.mp4 = { url: slot.mediaUrl, name: mp4Name(slot.name) };
+    // Si el navegador no logra reproducirlo, loadSlot recurre al servidor.
+    loadSlot(slot);
+  } catch (err) {
+    if (!slot.removed) loadViaServer(slot);
+  }
 }
 
 async function loadViaServer(slot, forceTranscode = false) {
@@ -595,6 +618,7 @@ function markReady(slot) {
   slot.ready = true;
   slot.duration = Number.isFinite(slot.video.duration) ? slot.video.duration : 0;
   setSlotStatus(slot, '');
+  queueBackgroundUpload(slot);
   syncAll(true);
   updateTimeline();
   updateMergeState();
@@ -1337,6 +1361,7 @@ async function merge(opts = {}) {
       width: opts.width || Number($('width-select').value),
       fps: opts.fps || Number($('fps-select').value),
       quality: opts.quality || $('quality-select').value,
+      speed: $('speed-merge-select').value,
       audioIndex: Number(audioSelect.value),
       expectedDuration,
     });
@@ -1601,6 +1626,15 @@ async function joinParts(base, others) {
     },
   };
   const fillGaps = $('concat-gaps').checked && times;
+  // Partes que están en este equipo: se intenta unir aquí, sin subirlas.
+  if (ordered.every((s) => s.file) && LocalFF.canUse(ordered.map((s) => s.file))) {
+    try {
+      const done = await joinPartsLocally(base, ordered, times, fillGaps, row);
+      if (done) return true;
+    } catch {
+      // se intenta en el servidor
+    }
+  }
   try {
     const progress = ordered.map(() => 0);
     const fileIds = await Promise.all(
@@ -1731,6 +1765,102 @@ async function downloadAllMp4() {
 }
 
 $('mp4-all-btn').addEventListener('click', downloadAllMp4);
+
+// --- Unir en el equipo (sin subir) ---
+
+async function joinPartsLocally(base, ordered, times, fillGaps, row) {
+  row.set('Revisando partes en tu equipo…', 5);
+  const files = ordered.map((s) => s.file);
+  const infos = await LocalFF.probe(files);
+  // Huecos de tiempo entre partes: rellenarlos requiere recodificar → servidor.
+  if (fillGaps && infos.length === files.length) {
+    for (let i = 1; i < files.length; i++) {
+      const gap = (times[i] - times[i - 1]) / 1000 - (infos[i - 1].duration || 0);
+      if (gap > 1) return false;
+    }
+  }
+  row.set('Uniendo en tu equipo…', 10);
+  const result = await LocalFF.concat(files, { onProgress: (pct) => row.set(`Uniendo en tu equipo… ${pct}%`, 10 + pct * 0.9) });
+  if (!result) return false;
+
+  const name = `${ordered[0].name.replace(/\s*\(\+\d+ partes?\)$/, '')} (+${ordered.length - 1} parte${ordered.length > 2 ? 's' : ''})`;
+  ordered.filter((s) => s !== base).forEach((s) => removeSlot(s.id));
+  const file = new File([result.blob], mp4Name(name), { type: 'video/mp4' });
+  base.name = name;
+  base.file = file;
+  base.sourceUrl = null;
+  base.keepName = true;
+  base.fileIdPromise = null; // se subirá solo si hace falta (mosaico, comprimir)
+  base.mediaUrl = URL.createObjectURL(result.blob);
+  base.mp4 = { url: base.mediaUrl, name: file.name };
+  base.ready = false;
+  base.duration = 0;
+  if (clockBase !== null && times) base.delay = Math.round((times[0] - clockBase) / 100) / 10;
+  if (slots.includes(base)) loadSlot(base);
+  else base.loaded = false;
+  render();
+  renderTray();
+  updateTimeline();
+
+  row.set(`✅ ${ordered.length} partes unidas en tu equipo · ${formatTime(result.duration)} (sin subir nada)`, 100, 'success');
+  const link = document.createElement('a');
+  link.className = 'btn success';
+  link.href = base.mediaUrl;
+  link.setAttribute('download', file.name);
+  link.textContent = '⬇ Descargar video unido';
+  row.li.appendChild(link);
+  return true;
+}
+
+// --- Subida en segundo plano ---
+// Mientras se mira, cada cámara se va subiendo (de a una) para que "Unir" y
+// "Comprimir" empiecen enseguida en vez de esperar la subida.
+
+const bgUploadQueue = [];
+let bgUploading = false;
+
+function bgUploadEnabled() {
+  const box = $('bg-upload');
+  return box && box.checked;
+}
+
+function queueBackgroundUpload(slot) {
+  if (!bgUploadEnabled() || slot.fileIdPromise || (!slot.file && !slot.sourceUrl) || bgUploadQueue.includes(slot)) return;
+  bgUploadQueue.push(slot);
+  pumpBackgroundUploads();
+}
+
+async function pumpBackgroundUploads() {
+  if (bgUploading) return;
+  bgUploading = true;
+  while (bgUploadQueue.length && bgUploadEnabled()) {
+    const slot = bgUploadQueue.shift();
+    if (slot.removed || slot.fileIdPromise || (!slot.file && !slot.sourceUrl)) continue;
+    try {
+      await ensureUploaded(slot, () => {});
+    } catch {
+      // se reintentará cuando se use
+    }
+  }
+  bgUploading = false;
+}
+
+(() => {
+  const box = $('bg-upload');
+  try {
+    box.checked = localStorage.getItem('bgUpload') !== '0';
+  } catch {
+    // sin almacenamiento
+  }
+  box.addEventListener('change', () => {
+    try {
+      localStorage.setItem('bgUpload', box.checked ? '1' : '0');
+    } catch {
+      // sin almacenamiento
+    }
+    if (box.checked) slots.forEach(queueBackgroundUpload);
+  });
+})();
 
 // --- Unir al cargar ---
 
