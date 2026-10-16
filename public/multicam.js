@@ -616,13 +616,22 @@ function whyServer(result, file) {
   return 'formato no reconocido';
 }
 
-// Las cámaras que necesitan el servidor se suben y preparan de a una: así la
-// primera queda lista pronto, en vez de avanzar todas lentamente a la vez.
-let serverLoadChain = Promise.resolve();
-function oneAtATime(fn) {
-  const run = serverLoadChain.then(fn, fn);
-  serverLoadChain = run.catch(() => {});
-  return run;
+// Las cámaras que necesitan el servidor se suben de a 2: así las primeras
+// quedan listas pronto (en vez de avanzar todas lentamente a la vez) y se
+// aprovecha mejor la conexión que subiendo de a una.
+const UPLOADS_AT_ONCE = 2;
+let uploadsRunning = 0;
+const uploadWaiters = [];
+async function oneAtATime(fn) {
+  if (uploadsRunning >= UPLOADS_AT_ONCE) await new Promise((resolve) => uploadWaiters.push(resolve));
+  uploadsRunning += 1;
+  try {
+    return await fn();
+  } finally {
+    uploadsRunning -= 1;
+    const next = uploadWaiters.shift();
+    if (next) next();
+  }
 }
 
 async function loadViaServer(slot, forceTranscode = false) {
@@ -637,7 +646,7 @@ async function loadViaServer(slot, forceTranscode = false) {
     // La subida va de a una cámara (comparten la conexión); la conversión en
     // el servidor puede ir en paralelo con la subida de la siguiente.
     if (!slot.fileIdPromise && slot.file) {
-      setSlotStatus(slot, `En espera: se sube una cámara a la vez${reason}`);
+      setSlotStatus(slot, `En espera: se suben 2 cámaras a la vez${reason}`);
       await oneAtATime(() => (slot.removed ? null : ensureUploaded(slot, onUpload).catch(() => null)));
       if (slot.removed) return;
     }
