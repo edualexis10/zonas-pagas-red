@@ -298,7 +298,7 @@ function enqueuePreviewJob(fileId, format, { canHevc = false, forceTranscode = f
     const command = ffmpeg(stored.path).outputOptions([
       '-map', '0:v:0',
       '-map', '0:a:0?',
-      '-vf', "scale='min(1280,iw)':-2:flags=bilinear,format=yuv420p",
+      '-vf', "scale='min(960,iw)':-2:flags=bilinear,format=yuv420p",
       '-threads', '0',
     ]);
     if (format === 'webm') {

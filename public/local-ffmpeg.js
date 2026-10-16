@@ -11,7 +11,7 @@
 const LocalFF = (() => {
   const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
   // El ffmpeg del navegador trabaja en memoria: archivos más grandes van al servidor.
-  const MAX_BYTES = (isMobile ? 0.4 : 1.5) * 1024 ** 3;
+  const MAX_BYTES = (isMobile ? 0.4 : 2.5) * 1024 ** 3;
   const supported = typeof WebAssembly === 'object' && typeof Worker === 'function';
 
   let ffPromise = null;
@@ -121,10 +121,12 @@ const LocalFF = (() => {
 
   // AVI/DAV/.264 con H.264 (o H.265 si el navegador lo reproduce) → MP4 sin
   // recodificar el video. Devuelve null si no se puede (otro formato de video).
+  // Si no se puede, devuelve { skip, codec } con el motivo.
   async function toMp4(file, { canHevc = false, onProgress } = {}) {
-    if (!canUse([file])) return null;
+    if (!canUse([file])) return { skip: file.size > MAX_BYTES ? 'size' : 'browser' };
     const [info] = await probe([file]);
-    if (!info || !(info.vcodec === 'h264' || (info.vcodec === 'hevc' && canHevc))) return null;
+    if (!info || !info.vcodec) return { skip: 'unknown' };
+    if (!(info.vcodec === 'h264' || (info.vcodec === 'hevc' && canHevc))) return { skip: 'codec', codec: info.vcodec };
     const { data } = await run(
       [file],
       (dir) => [

@@ -508,7 +508,10 @@ function loadSlot(slot) {
   if (!slot.mediaUrl && (SERVER_ONLY_EXT.includes(extOf(slot.name)) || (slot.sourceUrl && isShareLink(slot.sourceUrl)))) {
     // Videos del DVR en el equipo: se pasan a MP4 aquí mismo, sin subirlos.
     if (slot.file && LocalFF.canUse([slot.file])) loadLocally(slot);
-    else loadViaServer(slot);
+    else {
+      if (slot.file) slot.serverReason = whyServer({ skip: slot.file.size > LocalFF.MAX_BYTES ? 'size' : 'browser' }, slot.file);
+      loadViaServer(slot);
+    }
     return;
   }
 
@@ -523,6 +526,7 @@ function loadSlot(slot) {
     cleanup();
     video.removeAttribute('src');
     video.load();
+    if (slot.localMp4 && !slot.serverReason) slot.serverReason = 'este navegador no pudo reproducirlo directamente';
     loadViaServer(slot);
   };
   const ok = () => {
@@ -554,26 +558,64 @@ async function loadLocally(slot) {
       },
     });
     if (slot.removed) return;
-    if (!result) return loadViaServer(slot); // otro formato de video: lo hace el servidor
+    if (result.skip) {
+      // Formato que este navegador no puede mostrar sin convertir: lo hace el servidor.
+      slot.serverReason = whyServer(result, slot.file);
+      return loadViaServer(slot);
+    }
     slot.localMp4 = result.blob;
     slot.mediaUrl = URL.createObjectURL(result.blob);
     if (result.info.vcodec === 'h264') slot.mp4 = { url: slot.mediaUrl, name: mp4Name(slot.name) };
     // Si el navegador no logra reproducirlo, loadSlot recurre al servidor.
     loadSlot(slot);
   } catch (err) {
-    if (!slot.removed) loadViaServer(slot);
+    if (slot.removed) return;
+    slot.serverReason = 'no se pudo preparar en tu equipo';
+    loadViaServer(slot);
   }
 }
 
+const CODEC_NAMES = { hevc: 'H.265', h264: 'H.264', mpeg4: 'MPEG-4', mjpeg: 'MJPEG', vp9: 'VP9', av1: 'AV1' };
+
+// Motivo (para mostrarlo en la cámara) por el que hay que usar el servidor.
+function whyServer(result, file) {
+  if (result.skip === 'size') return `archivo de ${formatBytes(file.size)}: muy grande para prepararlo en el navegador`;
+  if (result.skip === 'browser') return 'este navegador no puede procesar videos localmente';
+  if (result.skip === 'codec') {
+    const name = CODEC_NAMES[result.codec] || String(result.codec).toUpperCase();
+    return result.codec === 'hevc'
+      ? 'video H.265: este navegador no lo reproduce. En Chrome o Edge suele verse sin subirlo'
+      : `video ${name}: hay que convertirlo`;
+  }
+  return 'formato no reconocido';
+}
+
+// Las cámaras que necesitan el servidor se suben y preparan de a una: así la
+// primera queda lista pronto, en vez de avanzar todas lentamente a la vez.
+let serverLoadChain = Promise.resolve();
+function oneAtATime(fn) {
+  const run = serverLoadChain.then(fn, fn);
+  serverLoadChain = run.catch(() => {});
+  return run;
+}
+
 async function loadViaServer(slot, forceTranscode = false) {
+  const reason = slot.serverReason ? ` (${slot.serverReason})` : '';
   try {
     const verb = slot.sourceUrl ? 'Descargando enlace' : 'Subiendo para convertir';
-    setSlotStatus(slot, `${verb}…`);
     const onUpload = (pct, bytes, note) => {
       if (slot.removed) return;
       const detail = pct ? `${pct}%` : bytes ? `${(bytes / 1048576).toFixed(1)} MB` : '';
-      setSlotStatus(slot, `${verb}… ${detail}${note ? ` (${note})` : ''}`);
+      setSlotStatus(slot, `${verb}… ${detail}${note ? ` (${note})` : reason}`);
     };
+    // La subida va de a una cámara (comparten la conexión); la conversión en
+    // el servidor puede ir en paralelo con la subida de la siguiente.
+    if (!slot.fileIdPromise && slot.file) {
+      setSlotStatus(slot, `En espera: se sube una cámara a la vez${reason}`);
+      await oneAtATime(() => (slot.removed ? null : ensureUploaded(slot, onUpload).catch(() => null)));
+      if (slot.removed) return;
+    }
+    setSlotStatus(slot, `${verb}…${reason}`);
     const job = await withFile(slot, onUpload, (fileId) => {
       if (slot.removed) return null;
       setSlotStatus(slot, 'Preparando para reproducir…');
