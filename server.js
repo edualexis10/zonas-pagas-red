@@ -766,7 +766,11 @@ function probeMedia(filePath) {
       const video = text.match(/Stream #\S+.*?: Video: (\w+)[^\n]*?, (\d{2,5})x(\d{2,5})/);
       const fps = text.match(/Stream #\S+.*?: Video:[^\n]*?, ([\d.]+) (?:fps|tbr)/);
       const audio = text.match(/Stream #\S+.*?: Audio: (\w+)/);
+      const format = text.match(/Input #0, ([\w,]+), from/);
+      const vIndex = text.match(/Stream #0:(\d+)\S*: Video:/);
       resolve({
+        format: format ? format[1] : null,
+        vIndex: vIndex ? Number(vIndex[1]) : -1,
         duration: dur ? Number(dur[1]) * 3600 + Number(dur[2]) * 60 + Number(dur[3]) : 0,
         vcodec: video ? video[1] : null,
         width: video ? Number(video[2]) : 0,
@@ -808,9 +812,28 @@ function enqueueConcatJob(parts, offsets, name) {
       });
       const hasGaps = gaps.some((g) => g > 0);
       const first = infos[0];
+      // Para pegar el video sin recodificar, todas las partes deben tener el
+      // mismo tipo de video y de archivo. El audio NO tiene que coincidir: se
+      // procesa aparte (ver audioChain).
       const sameKind = infos.every(
-        (i) => i.vcodec === first.vcodec && i.width === first.width && i.height === first.height && !!i.acodec === !!first.acodec
+        (i) =>
+          i.vcodec === first.vcodec &&
+          i.width === first.width &&
+          i.height === first.height &&
+          i.format === first.format &&
+          i.vIndex === first.vIndex
       );
+      const withAudio = infos.some((i) => i.acodec);
+      // Audio de una parte: se lleva al mismo formato y se ajusta exactamente
+      // a la duración de su video (relleno con silencio o recortado), para que
+      // el audio de las partes siguientes no se corra. Si la parte no tiene
+      // audio, se pone silencio de la misma duración.
+      const audioChain = (i, inputIndex, label) => {
+        const d = round3(infos[i].duration || 1);
+        return infos[i].acodec
+          ? `[${inputIndex}:a:0]aresample=48000,aformat=sample_fmts=fltp:channel_layouts=stereo,apad,atrim=duration=${d},asetpts=PTS-STARTPTS[${label}]`
+          : `anullsrc=r=48000:cl=stereo,atrim=duration=${d}[${label}]`;
+      };
       const progress = (p) => {
         job.progress = p;
       };
@@ -818,20 +841,32 @@ function enqueueConcatJob(parts, offsets, name) {
       let done = false;
       if (!hasGaps && sameKind && ['h264', 'hevc'].includes(first.vcodec)) {
         // Camino rápido: pegar sin recodificar el video.
+        // El video se pega sin recodificar; el audio de cada parte se toma de
+        // su propio archivo y se une aparte (rápido: el audio pesa poco).
         fs.writeFileSync(listPath, parts.map((p) => `file '${p.path.replace(/'/g, "'\\''")}'`).join('\n'));
-        const command = ffmpeg()
-          .input(listPath)
-          .inputOptions('-f', 'concat', '-safe', '0')
-          .outputOptions(
-            '-map', '0:v:0',
-            ...(first.acodec ? ['-map', '0:a:0', '-c:a', 'aac', '-b:a', '128k'] : ['-an']),
-            '-c:v', 'copy',
-            '-movflags', '+faststart'
-          )
-          .toFormat('mp4');
+        const command = ffmpeg().input(listPath).inputOptions('-f', 'concat', '-safe', '0');
+        const outputOptions = ['-map', '0:v:0', '-c:v', 'copy'];
+        if (withAudio) {
+          parts.forEach((p) => command.input(p.path));
+          const chains = parts.map((_, i) => audioChain(i, i + 1, `a${i}`));
+          const labels = parts.map((_, i) => `[a${i}]`).join('');
+          outputOptions.push(
+            '-filter_complex', `${chains.join(';')};${labels}concat=n=${parts.length}:v=0:a=1[outa]`,
+            '-map', '[outa]',
+            '-c:a', 'aac',
+            '-b:a', '128k'
+          );
+        } else {
+          outputOptions.push('-an');
+        }
+        outputOptions.push('-movflags', '+faststart');
+        command.outputOptions(...outputOptions).toFormat('mp4');
         try {
           await runCommand(command, outPath, progress, total);
-          done = true;
+          // Se comprueba que el resultado dure lo esperado (si no, algo se
+          // mezcló mal y se usa el camino seguro).
+          const check = await probeMedia(outPath);
+          done = Math.abs(check.duration - total) <= Math.max(2, total * 0.02);
         } catch {
           // Falló (partes incompatibles): se recodifica abajo.
         }
@@ -841,7 +876,6 @@ function enqueueConcatJob(parts, offsets, name) {
         const W = Math.max(2, first.width - (first.width % 2)) || 1280;
         const H = Math.max(2, first.height - (first.height % 2)) || 720;
         const F = Math.round(first.fps) > 0 && first.fps <= 60 ? Math.round(first.fps) : 25;
-        const withAudio = infos.some((i) => i.acodec);
         const command = ffmpeg();
         parts.forEach((p) => command.input(p.path));
         const filters = [];
@@ -856,13 +890,7 @@ function enqueueConcatJob(parts, offsets, name) {
             `[${i}:v:0]scale=${W}:${H}:force_original_aspect_ratio=decrease,pad=${W}:${H}:(ow-iw)/2:(oh-ih)/2:color=black,` +
               `setsar=1,fps=${F},format=yuv420p[v${i}]`
           );
-          if (withAudio) {
-            filters.push(
-              infos[i].acodec
-                ? `[${i}:a:0]aresample=48000,aformat=channel_layouts=stereo[a${i}]`
-                : `anullsrc=r=48000:cl=stereo,atrim=duration=${round3(infos[i].duration || 1)}[a${i}]`
-            );
-          }
+          if (withAudio) filters.push(audioChain(i, i, `a${i}`));
           labels.push(`[v${i}]${withAudio ? `[a${i}]` : ''}`);
         });
         const n = labels.length;
