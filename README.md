@@ -2,6 +2,22 @@
 
 Aplicación web para ver hasta **8 cámaras sincronizadas** a la vez (como un DVR), **unirlas en un solo video mosaico** para descargarlo, y convertir varios videos de distintos tamaños, en paralelo, entre distintos formatos (MP4, AVI, MOV, MKV, WEBM, GIF).
 
+## Instalar en un servidor propio (Ubuntu + Caddy)
+
+Como root en el servidor:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/edualexis10/zonas-pagas-red/main/deploy/install.sh | bash
+```
+
+Instala Node 22 si falta, descarga la app en `/opt/zonas-pagas-red`, guarda los videos en `/var/lib/zonas-pagas-red` y la deja como servicio `zonas-pagas-red` (puerto interno 3010, con menor prioridad de CPU que las demás apps). La configuración (contraseña `APP_PASSWORD`, `MAX_JOBS`) queda en `/etc/zonas-pagas-red.env`. Volver a ejecutar el mismo comando actualiza la app. Para publicarla, en `/etc/caddy/Caddyfile`:
+
+```
+videos.tu-dominio.cl {
+    reverse_proxy 127.0.0.1:3010
+}
+```
+
 ## Publicar en internet (Render)
 
 [![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://render.com/deploy?repo=https://github.com/edualexis10/zonas-pagas-red)
