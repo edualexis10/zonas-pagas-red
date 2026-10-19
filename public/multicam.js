@@ -1203,7 +1203,8 @@ const compressBtn = $('compress-btn');
 const compressTarget = $('compress-target');
 const COMPRESS_HINTS = {
   alta: 'Casi no se nota diferencia. Útil cuando el video viene sin comprimir o muy pesado desde el DVR.',
-  equilibrada: 'Recomendado: la imagen se ve prácticamente igual y suele pesar entre la mitad y un tercio. Si el video supera 1080p se baja a 1080p.',
+  rapida: '⚡ La más rápida: baja a 720p y a máximo 15 cuadros por segundo (las cámaras de vigilancia suelen grabar así). Se ve bien y pesa poco. Para ir aún más rápido, comprime solo el tramo que necesitas con ✂ Recortar.',
+  equilibrada: 'Mantiene 1080p: la imagen se ve prácticamente igual y suele pesar entre la mitad y un tercio. Si el video supera 1080p se baja a 1080p.',
   extrema: 'Compresión extrema: 480p, 10 cuadros por segundo y audio básico. Solo para casos excepcionales (adjuntar a un correo con límite de tamaño, enviar con mala señal). Se pierde detalle: patentes y rostros lejanos pueden no leerse.',
   maxima: 'Pesa mucho menos (ideal para WhatsApp o correo), pero se baja a 720p y se nota un poco en detalles finos como patentes lejanas.',
 };
@@ -1237,8 +1238,8 @@ function updateCompressOptions() {
 }
 
 // Ancho total del mosaico según el nivel: más compresión, menos resolución.
-const MERGE_WIDTH_BY_LEVEL = { alta: 1920, equilibrada: 1920, maxima: 1280, extrema: 960 };
-const MERGE_FPS_BY_LEVEL = { extrema: 10 };
+const MERGE_WIDTH_BY_LEVEL = { alta: 1920, equilibrada: 1920, rapida: 1280, maxima: 1280, extrema: 960 };
+const MERGE_FPS_BY_LEVEL = { rapida: 15, extrema: 10 };
 
 function compressMerged(level) {
   const row = addCompressRow(`Mosaico unido · ${slots.length} cámaras`);
