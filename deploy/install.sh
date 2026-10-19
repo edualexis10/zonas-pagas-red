@@ -53,6 +53,8 @@ mkdir -p "$DATA_DIR"
 chown -R "$APP_USER:$APP_USER" "$DATA_DIR"
 
 say "Código de la app ($BRANCH)"
+# La carpeta pertenece al usuario de la app; root la puede actualizar igual.
+git config --global --get-all safe.directory 2>/dev/null | grep -qx "$APP_DIR" || git config --global --add safe.directory "$APP_DIR"
 if [ -d "$APP_DIR/.git" ]; then
   git -C "$APP_DIR" fetch -q origin "$BRANCH"
   git -C "$APP_DIR" reset -q --hard "origin/$BRANCH"
@@ -106,8 +108,32 @@ MemoryMax=2500M
 [Install]
 WantedBy=multi-user.target
 EOF
+say "Actualización automática (revisa GitHub cada 30 minutos)"
+cat > "/etc/systemd/system/$SERVICE-update.service" <<UNIT
+[Unit]
+Description=Actualiza el Visor Multicámara desde GitHub si hay cambios
+
+[Service]
+Type=oneshot
+Environment=BRANCH=$BRANCH
+ExecStart=/bin/bash $APP_DIR/deploy/update.sh
+UNIT
+cat > "/etc/systemd/system/$SERVICE-update.timer" <<UNIT
+[Unit]
+Description=Revisar actualizaciones del Visor Multicámara
+
+[Timer]
+OnBootSec=10min
+OnUnitActiveSec=30min
+RandomizedDelaySec=2min
+
+[Install]
+WantedBy=timers.target
+UNIT
+
 systemctl daemon-reload
 systemctl enable -q "$SERVICE"
+systemctl enable -q --now "$SERVICE-update.timer"
 systemctl restart "$SERVICE"
 
 say "Comprobando que responde"
@@ -138,5 +164,6 @@ Comandos útiles:
   Ver estado:      systemctl status $SERVICE
   Ver mensajes:    journalctl -u $SERVICE -f
   Contraseña:      nano $ENV_FILE   (APP_PASSWORD=...) y luego  systemctl restart $SERVICE
-  Actualizar app:  vuelve a ejecutar este mismo instalador
+  Actualizar app:  es automático (cada 30 min, solo si no hay videos procesándose)
+                   Para forzarlo ahora:  systemctl start $SERVICE-update
 EOF

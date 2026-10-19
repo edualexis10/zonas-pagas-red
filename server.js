@@ -1100,6 +1100,20 @@ const app = express();
 
 // Para el hosting: comprobación de salud (sin contraseña).
 app.get('/healthz', (req, res) => res.send('ok'));
+// Para la actualización automática del servidor propio: no reiniciar la app
+// mientras sube o procesa videos.
+app.get('/healthz/busy', (req, res) => {
+  const working = [...jobs.values()].some((j) => j.status === 'processing' || j.status === 'queued');
+  // Subida activa = recibió un trozo en los últimos 2 minutos (las abandonadas no cuentan).
+  const uploading = [...uploadSessions.keys()].some((id) => {
+    try {
+      return Date.now() - fs.statSync(metaPath(id)).mtimeMs < 2 * 60 * 1000;
+    } catch {
+      return false;
+    }
+  });
+  res.json({ busy: working || active > 0 || uploading });
+});
 
 // Contraseña opcional: si se define APP_PASSWORD (p. ej. en Render), el
 // navegador la pide una vez y la recuerda. Sin la variable, la app es abierta.
